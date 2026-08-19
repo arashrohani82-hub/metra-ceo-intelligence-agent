@@ -31,6 +31,7 @@ Research rules:
 - If reliable information is unavailable, say: داده قابل اتکای کافی پیدا نشد.
 - Distinguish facts from analysis.
 - Do not sensationalize politics.
+- Keep raw URLs out of the main body whenever possible. Mention source names briefly instead of dumping long links.
 
 Style:
 - Persian
@@ -38,6 +39,25 @@ Style:
 - use current values, previous values and percentage changes when meaningful
 - explain what happened, why it matters, what may happen next and what the CEO should watch
 """
+
+BUTTON_TO_SECTION = {
+    "🧠 CEO Brief": "report",
+    "🇮🇷 Iran & Assets": "iran",
+    "🇨🇦 Canada": "canada",
+    "🏗 Engineering & Construction": "construction",
+    "📊 Prices & Markets": "prices",
+}
+
+MAIN_KEYBOARD = {
+    "keyboard": [
+        [{"text": "🧠 CEO Brief"}],
+        [{"text": "🇨🇦 Canada"}, {"text": "🇮🇷 Iran & Assets"}],
+        [{"text": "🏗 Engineering & Construction"}],
+        [{"text": "📊 Prices & Markets"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
 
 
 def build_prompt(section: str) -> str:
@@ -92,29 +112,27 @@ def generate_report(section: str) -> str:
     return response.output_text
 
 
-def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID):
+def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID, with_menu: bool = False):
     max_length = 3900
     chunks = [message[i:i + max_length] for i in range(0, len(message), max_length)] or [""]
 
-    for chunk in chunks:
+    for i, chunk in enumerate(chunks):
+        payload = {"chat_id": chat_id, "text": chunk}
+        if with_menu and i == len(chunks) - 1:
+            payload["reply_markup"] = MAIN_KEYBOARD
+
         response = requests.post(
             f"{TELEGRAM_API}/sendMessage",
-            json={"chat_id": chat_id, "text": chunk},
+            json=payload,
             timeout=30,
         )
         response.raise_for_status()
 
 
-def help_text() -> str:
+def welcome_text() -> str:
     return (
         "🧠 Metra CEO Intelligence\n\n"
-        "دستورهای فعال:\n"
-        "/report — گزارش کامل CEO\n"
-        "/iran — ایران، ارز، طلا و دارایی‌ها\n"
-        "/canada — اقتصاد و بازار کانادا\n"
-        "/construction — مهندسی و ساخت‌وساز\n"
-        "/prices — داشبورد قیمت‌ها\n"
-        "/help — راهنما\n\n"
+        "یکی از گزینه‌های زیر را انتخاب کن.\n"
         "گزارش‌ها با جست‌وجوی وب و اطلاعات به‌روز تهیه می‌شوند."
     )
 
@@ -122,7 +140,8 @@ def help_text() -> str:
 def handle_message(message: dict):
     chat = message.get("chat", {})
     chat_id = str(chat.get("id", ""))
-    text = (message.get("text") or "").strip().lower()
+    original_text = (message.get("text") or "").strip()
+    text = original_text.lower()
 
     if chat_id != TELEGRAM_CHAT_ID:
         if chat_id:
@@ -130,7 +149,7 @@ def handle_message(message: dict):
         return
 
     if text in {"/start", "/help", "hello", "hi"}:
-        send_telegram(help_text(), chat_id)
+        send_telegram(welcome_text(), chat_id, with_menu=True)
         return
 
     command_map = {
@@ -141,23 +160,25 @@ def handle_message(message: dict):
         "/prices": "prices",
     }
 
-    if text not in command_map:
-        send_telegram("دستور را نشناختم. /help را بزن.", chat_id)
+    section = BUTTON_TO_SECTION.get(original_text) or command_map.get(text)
+
+    if not section:
+        send_telegram("یکی از دکمه‌های منو را انتخاب کن.", chat_id, with_menu=True)
         return
 
     send_telegram("⏳ در حال بررسی منابع به‌روز و تهیه گزارش...", chat_id)
 
     try:
-        report = generate_report(command_map[text])
-        send_telegram(report, chat_id)
+        report = generate_report(section)
+        send_telegram(report, chat_id, with_menu=True)
     except Exception as exc:
         print(f"OpenAI/report error: {type(exc).__name__}: {exc}", flush=True)
-        send_telegram("⚠️ در تهیه گزارش خطایی رخ داد. چند دقیقه دیگر دوباره امتحان کن.", chat_id)
+        send_telegram("⚠️ در تهیه گزارش خطایی رخ داد. چند دقیقه دیگر دوباره امتحان کن.", chat_id, with_menu=True)
 
 
 def poll_telegram():
     offset = None
-    print("CEO Intelligence Telegram bot is running...", flush=True)
+    print("CEO Intelligence Telegram bot is running with button menu...", flush=True)
 
     while True:
         try:
