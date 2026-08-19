@@ -1,16 +1,40 @@
 import os
 import time
+import threading
 import requests
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 
-client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+# Longer timeout for web-search reports, without blocking Telegram polling.
+client = OpenAI(
+    api_key=os.environ["OPENAI_API_KEY"],
+    timeout=120.0,
+    max_retries=1,
+)
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
-
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# Background workers keep Telegram responsive while reports are generated.
+EXECUTOR = ThreadPoolExecutor(max_workers=3)
+CACHE_LOCK = threading.Lock()
+CACHE = {}  # section -> {text, updated_at}
+RUNNING = set()
+LAST_SECTION_BY_CHAT = {}
+
+CACHE_TTL = {
+    "report": 1800,          # 30 min
+    "alerts": 600,           # 10 min
+    "canada": 1800,
+    "iran": 900,             # 15 min
+    "construction": 1800,
+    "prices": 600,           # 10 min
+    "global": 1800,
+    "opportunities": 3600,   # 60 min
+}
 
 SYSTEM_PROMPT = """
 You are the External Intelligence Analyst for the CEO of an engineering consulting company in Canada.
@@ -58,6 +82,7 @@ MAIN_KEYBOARD = {
         [{"text": "🏗 مهندسی و ساخت‌وساز"}],
         [{"text": "📊 قیمت‌ها و بازارها"}],
         [{"text": "🌎 اقتصاد جهانی"}, {"text": "📈 فرصت‌های تجاری"}],
+        [{"text": "🔄 بروزرسانی زنده"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -131,17 +156,114 @@ def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID, with_menu: bool
         response = requests.post(
             f"{TELEGRAM_API}/sendMessage",
             json=payload,
-            timeout=30,
+            timeout=20,
         )
         response.raise_for_status()
 
 
+def cache_get(section: str):
+    with CACHE_LOCK:
+        item = CACHE.get(section)
+        if not item:
+            return None, False
+        age = time.time() - item["updated_at"]
+        fresh = age <= CACHE_TTL.get(section, 1800)
+        return item, fresh
+
+
+def cache_set(section: str, text: str):
+    with CACHE_LOCK:
+        CACHE[section] = {"text": text, "updated_at": time.time()}
+
+
+def format_cache_time(ts: float) -> str:
+    return datetime.fromtimestamp(ts).strftime("%H:%M")
+
+
+def report_worker(section: str, chat_id: str, notify: bool = True):
+    try:
+        print(f"Background report started: {section}", flush=True)
+        report = generate_report(section)
+        cache_set(section, report)
+        print(f"Background report completed: {section}", flush=True)
+        if notify:
+            send_telegram("✅ بروزرسانی آماده شد.\n\n" + report, chat_id, with_menu=True)
+    except Exception as exc:
+        print(f"Background report error [{section}]: {type(exc).__name__}: {exc}", flush=True)
+        if notify:
+            send_telegram("⚠️ بروزرسانی زنده این بخش کامل نشد. نسخه قبلی همچنان قابل استفاده است.", chat_id, with_menu=True)
+    finally:
+        with CACHE_LOCK:
+            RUNNING.discard(section)
+
+
+def start_background_report(section: str, chat_id: str, notify: bool = True) -> bool:
+    with CACHE_LOCK:
+        if section in RUNNING:
+            return False
+        RUNNING.add(section)
+    EXECUTOR.submit(report_worker, section, chat_id, notify)
+    return True
+
+
 def welcome_text() -> str:
     return (
-        "🧠 Metra CEO Intelligence\n\n"
-        "یکی از گزینه‌های زیر را انتخاب کن.\n"
-        "گزارش‌ها با جست‌وجوی وب و اطلاعات به‌روز تهیه می‌شوند."
+        "⚡ Metra CEO Intelligence\n\n"
+        "منو همیشه فوری پاسخ می‌دهد. گزارش‌های سنگین در پس‌زمینه بروزرسانی می‌شوند.\n"
+        "یکی از گزینه‌های زیر را انتخاب کن."
     )
+
+
+def serve_section(section: str, chat_id: str):
+    LAST_SECTION_BY_CHAT[chat_id] = section
+    item, fresh = cache_get(section)
+
+    if item and fresh:
+        send_telegram(
+            f"⚡ آخرین داده آماده — بروزرسانی {format_cache_time(item['updated_at'])}\n\n{item['text']}",
+            chat_id,
+            with_menu=True,
+        )
+        return
+
+    if item and not fresh:
+        send_telegram(
+            f"⚡ آخرین نسخه موجود — {format_cache_time(item['updated_at'])}\n"
+            "🔄 هم‌زمان نسخه تازه را در پس‌زمینه آماده می‌کنم.\n\n"
+            + item["text"],
+            chat_id,
+            with_menu=True,
+        )
+        start_background_report(section, chat_id, notify=True)
+        return
+
+    started = start_background_report(section, chat_id, notify=True)
+    if started:
+        send_telegram(
+            "⚡ درخواست ثبت شد. ربات آزاد است و می‌توانی همین الان از بقیه دکمه‌ها استفاده کنی.\n"
+            "⏳ اولین نسخه این بخش در پس‌زمینه آماده می‌شود و پس از تکمیل خودکار می‌آید.",
+            chat_id,
+            with_menu=True,
+        )
+    else:
+        send_telegram(
+            "⏳ بروزرسانی این بخش از قبل در حال انجام است. لازم نیست دوباره صبر کنی؛ می‌توانی از منو استفاده کنی.",
+            chat_id,
+            with_menu=True,
+        )
+
+
+def force_refresh(chat_id: str):
+    section = LAST_SECTION_BY_CHAT.get(chat_id)
+    if not section:
+        send_telegram("اول یکی از بخش‌های گزارش را انتخاب کن، بعد «🔄 بروزرسانی زنده» را بزن.", chat_id, with_menu=True)
+        return
+
+    started = start_background_report(section, chat_id, notify=True)
+    if started:
+        send_telegram("🔄 بروزرسانی زنده شروع شد. می‌توانی هم‌زمان از بقیه دکمه‌ها استفاده کنی.", chat_id, with_menu=True)
+    else:
+        send_telegram("⏳ همین بخش الان در حال بروزرسانی است.", chat_id, with_menu=True)
 
 
 def handle_message(message: dict):
@@ -159,6 +281,10 @@ def handle_message(message: dict):
         send_telegram(welcome_text(), chat_id, with_menu=True)
         return
 
+    if original_text == "🔄 بروزرسانی زنده":
+        force_refresh(chat_id)
+        return
+
     command_map = {
         "/report": "report",
         "/alerts": "alerts",
@@ -171,56 +297,63 @@ def handle_message(message: dict):
     }
 
     section = BUTTON_TO_SECTION.get(original_text) or command_map.get(text)
-
     if not section:
         send_telegram("یکی از دکمه‌های منو را انتخاب کن.", chat_id, with_menu=True)
         return
 
-    send_telegram("⏳ در حال بررسی منابع به‌روز و تهیه گزارش...", chat_id)
+    serve_section(section, chat_id)
 
-    try:
-        report = generate_report(section)
-        send_telegram(report, chat_id, with_menu=True)
-    except Exception as exc:
-        print(f"OpenAI/report error: {type(exc).__name__}: {exc}", flush=True)
-        send_telegram("⚠️ در تهیه گزارش خطایی رخ داد. چند دقیقه دیگر دوباره امتحان کن.", chat_id, with_menu=True)
+
+def cache_maintenance_loop():
+    # Refresh only sections that have already been requested. This keeps cost controlled.
+    while True:
+        time.sleep(60)
+        now = time.time()
+        with CACHE_LOCK:
+            sections = list(CACHE.keys())
+        for section in sections:
+            item, fresh = cache_get(section)
+            if item and not fresh:
+                start_background_report(section, TELEGRAM_CHAT_ID, notify=False)
 
 
 def poll_telegram():
     offset = None
-    print("CEO Intelligence Telegram bot is running with Persian button menu...", flush=True)
+    print("FAST CEO bot running: responsive menu + background reports + cache", flush=True)
+    threading.Thread(target=cache_maintenance_loop, daemon=True).start()
 
     while True:
         try:
-            params = {"timeout": 50}
+            params = {"timeout": 30}
             if offset is not None:
                 params["offset"] = offset
 
             response = requests.get(
                 f"{TELEGRAM_API}/getUpdates",
                 params=params,
-                timeout=60,
+                timeout=40,
             )
             response.raise_for_status()
             data = response.json()
 
             if not data.get("ok"):
                 print(f"Telegram API error: {data}", flush=True)
-                time.sleep(5)
+                time.sleep(3)
                 continue
 
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
                 message = update.get("message")
                 if message:
+                    # handle_message is intentionally lightweight; heavy work goes to EXECUTOR.
                     handle_message(message)
 
         except requests.RequestException as exc:
             print(f"Telegram polling error: {exc}", flush=True)
-            time.sleep(5)
+            time.sleep(3)
         except Exception as exc:
             print(f"Unexpected error: {type(exc).__name__}: {exc}", flush=True)
-            time.sleep(5)
+            time.sleep(3)
 
 
 if __name__ == "__main__":
