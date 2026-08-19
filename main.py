@@ -1,258 +1,196 @@
 import os
+import time
 import requests
 from datetime import datetime
 from openai import OpenAI
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-
+TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5")
 
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 SYSTEM_PROMPT = """
-You are the External Intelligence Analyst for the CEO of an engineering
-consulting company in Canada.
+You are the External Intelligence Analyst for the CEO of an engineering consulting company in Canada.
 
-Your responsibility is to research current external information and produce
-a concise Persian-language CEO intelligence brief.
+Your responsibility is to research current external information and produce concise Persian-language executive intelligence.
 
-The CEO is interested in:
+Priority areas:
+1. Canada / Quebec / British Columbia: Bank of Canada, interest rates, inflation, CAD/USD, economy, housing, construction activity, permits, infrastructure investment.
+2. Engineering & Construction: structural, civil and geotechnical engineering; consulting fees; labour and salary trends; steel, rebar, concrete, cement, lumber, asphalt, aggregates, excavation, drilling, surveying, lab testing, equipment rental; BIM, Revit, LiDAR, drones, AI; regulations; tenders and opportunities.
+3. Iran & Assets: USD/IRR free-market rate, EUR/IRR and CAD/IRR when reliable, Iranian gold and coins, international gold, inflation, monetary policy, liquidity, interest rates, Tehran real estate, transaction volume, taxation, capital controls, sanctions and geopolitical risk.
+4. Global: only developments that materially affect Canada, Iran, gold, oil, currencies, construction, engineering, interest rates or the CEO's assets.
 
-1. CANADA / QUEBEC / BC
-- Bank of Canada
-- interest rates
-- inflation
-- CAD/USD
-- economy
-- housing market
-- construction activity
-- building permits
-- infrastructure investment
+Research rules:
+- Use current web information.
+- Prioritize governments, central banks, regulators, statistical agencies, professional organizations, established financial publications and reputable industry sources.
+- Cross-check important Iran figures when possible.
+- Never invent a price or statistic.
+- If reliable information is unavailable, say: داده قابل اتکای کافی پیدا نشد.
+- Distinguish facts from analysis.
+- Do not sensationalize politics.
 
-2. ENGINEERING & CONSTRUCTION
-- structural engineering
-- civil engineering
-- geotechnical engineering
-- engineering consulting
-- construction demand
-- engineering fees
-- labour and salary trends
-- steel
-- rebar
-- concrete
-- cement
-- lumber
-- asphalt
-- aggregates
-- excavation
-- drilling
-- surveying
-- laboratory testing
-- equipment rental
-- BIM
-- Revit
-- LiDAR
-- drones
-- AI in engineering
-- important codes and regulations
-- major tenders and infrastructure opportunities
+Style:
+- Persian
+- concise, numerical, neutral and decision-oriented
+- use current values, previous values and percentage changes when meaningful
+- explain what happened, why it matters, what may happen next and what the CEO should watch
+"""
 
-3. IRAN & ASSETS
-The CEO has financial exposure and assets in Iran.
 
-Monitor:
-- USD/IRR free-market rate
-- EUR/IRR when useful
-- CAD/IRR when reliable
-- Iranian gold
-- Iranian gold coins
-- international gold
-- inflation
-- monetary policy
-- liquidity
-- interest rates
-- Tehran real estate
-- property market
-- transaction volume
-- taxation
-- capital controls
-- sanctions
-- geopolitical risk
+def build_prompt(section: str) -> str:
+    today = datetime.now().strftime("%Y-%m-%d")
 
-Always distinguish free-market exchange rates from official rates.
+    if section == "report":
+        return f"""
+Today is {today}. Search the web and prepare a current CEO External Intelligence Brief.
+Focus on the last 24 hours and last 7 days.
 
-4. GLOBAL
-Only include global developments that materially affect:
-Canada, Iran, gold, oil, currencies, construction, interest rates,
-engineering or the CEO's assets.
-
-RESEARCH RULES
-
-Use current web information.
-
-Prioritize:
-- government sources
-- central banks
-- regulators
-- statistical agencies
-- professional engineering organizations
-- established financial publications
-- reputable industry sources
-
-Cross-check important Iran-related figures when possible.
-
-Never invent a price or statistic.
-
-If reliable information cannot be found, write:
-"داده قابل اتکای کافی پیدا نشد."
-
-Separate facts from your analysis.
-
-Do not sensationalize political news.
-
-OUTPUT LANGUAGE:
-Persian.
-
-STYLE:
-Very concise, numerical and decision-oriented.
-The report should take approximately 5 minutes to read.
-
-For important numbers include:
-- current value
-- previous value when available
-- percentage change when meaningful
-- direction: ↑ ↓ →
-
-REPORT FORMAT:
-
+Use this exact structure:
 🧠 CEO EXTERNAL INTELLIGENCE BRIEF
-Date: [today]
+Date: {today}
 
 🚨 CEO ALERTS
-Maximum 5 genuinely important developments.
+Maximum 5 important developments.
 
 🇨🇦 CANADA
-Most important Canadian economic developments.
 
 🏗 ENGINEERING & CONSTRUCTION
-Prices, market demand, engineering industry, regulations,
-technologies and opportunities.
 
 🇮🇷 IRAN & ASSETS
-Currency, gold, real estate, economy, sanctions and geopolitical risk.
 
 🌎 GLOBAL SIGNALS
-Only globally relevant developments.
 
 📈 OPPORTUNITIES
-Potential actionable opportunities.
 
 ⚠️ RISKS
-Important emerging risks.
 
 🎯 CEO TAKEAWAYS
 Finish with 3 to 7 concrete CEO-level observations or actions.
-
-Each major point should answer when appropriate:
-- What happened?
-- Why?
-- Why does it matter?
-- What should the CEO watch next?
-
-Do not fill the report with generic news.
-Only include information with potential financial, strategic,
-business or asset impact.
 """
 
+    prompts = {
+        "iran": f"""Today is {today}. Search the web and give me a concise Iran asset intelligence brief in Persian. Focus on USD/IRR free-market rate, gold, coins, inflation, monetary policy, property/real-estate signals, sanctions and geopolitical developments that can materially affect asset values. Separate confirmed data from estimates and explain what matters for an asset owner.""",
+        "canada": f"""Today is {today}. Search the web and give me a concise Canada/Quebec/BC CEO intelligence brief in Persian. Focus on Bank of Canada, rates, inflation, CAD/USD, housing, construction, permits, infrastructure spending and business conditions. End with CEO implications.""",
+        "construction": f"""Today is {today}. Search the web and give me a concise Canadian engineering and construction market brief in Persian. Focus on structural/civil/geotechnical demand, engineering fees, labour costs, steel, rebar, concrete, lumber, asphalt, excavation, drilling, surveying, regulations, tenders and technologies. End with pricing and business implications.""",
+        "prices": f"""Today is {today}. Search the web and prepare a concise price-and-market dashboard in Persian for a Canadian engineering CEO. Include the latest reliable values/trends available for CAD/USD, international gold, USD/IRR free market, Iranian gold/coins when reliable, Bank of Canada rate, and major construction material price trends. Use N/A rather than inventing data. Show direction arrows and percentage changes when available.""",
+    }
+    return prompts[section]
 
-def generate_report():
-    today = datetime.now().strftime("%Y-%m-%d")
 
-    user_prompt = f"""
-Today is {today}.
-
-Search the web for the latest reliable information available today and
-prepare the CEO External Intelligence Brief.
-
-Give special attention to developments from the last 24 hours and last
-7 days.
-
-For market prices and economic indicators, use the latest available data.
-
-For Iran, carefully distinguish confirmed data from estimates and
-free-market information.
-
-Include sources implicitly through the research process, but keep the
-actual CEO report clean and readable.
-"""
-
+def generate_report(section: str) -> str:
     response = client.responses.create(
         model=MODEL,
-        tools=[
-            {
-                "type": "web_search",
-                "search_context_size": "high"
-            }
-        ],
+        tools=[{"type": "web_search"}],
         input=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT
-            },
-            {
-                "role": "user",
-                "content": user_prompt
-            }
-        ]
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": build_prompt(section)},
+        ],
     )
-
     return response.output_text
 
 
-def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials not configured.")
-        print(message)
-        return
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
-    # Telegram has a message length limit, so split long reports.
+def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID):
     max_length = 3900
-
-    chunks = [
-        message[i:i + max_length]
-        for i in range(0, len(message), max_length)
-    ]
+    chunks = [message[i:i + max_length] for i in range(0, len(message), max_length)] or [""]
 
     for chunk in chunks:
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": chunk
-        }
-
         response = requests.post(
-            url,
-            json=payload,
-            timeout=30
+            f"{TELEGRAM_API}/sendMessage",
+            json={"chat_id": chat_id, "text": chunk},
+            timeout=30,
         )
-
         response.raise_for_status()
 
 
-def main():
-    print("Generating CEO Intelligence Brief...")
+def help_text() -> str:
+    return (
+        "🧠 Metra CEO Intelligence\n\n"
+        "دستورهای فعال:\n"
+        "/report — گزارش کامل CEO\n"
+        "/iran — ایران، ارز، طلا و دارایی‌ها\n"
+        "/canada — اقتصاد و بازار کانادا\n"
+        "/construction — مهندسی و ساخت‌وساز\n"
+        "/prices — داشبورد قیمت‌ها\n"
+        "/help — راهنما\n\n"
+        "گزارش‌ها با جست‌وجوی وب و اطلاعات به‌روز تهیه می‌شوند."
+    )
 
-    report = generate_report()
 
-    print(report)
+def handle_message(message: dict):
+    chat = message.get("chat", {})
+    chat_id = str(chat.get("id", ""))
+    text = (message.get("text") or "").strip().lower()
 
-    send_telegram(report)
+    if chat_id != TELEGRAM_CHAT_ID:
+        if chat_id:
+            send_telegram("این ربات خصوصی است.", chat_id)
+        return
 
-    print("CEO Intelligence Brief completed.")
+    if text in {"/start", "/help", "hello", "hi"}:
+        send_telegram(help_text(), chat_id)
+        return
+
+    command_map = {
+        "/report": "report",
+        "/iran": "iran",
+        "/canada": "canada",
+        "/construction": "construction",
+        "/prices": "prices",
+    }
+
+    if text not in command_map:
+        send_telegram("دستور را نشناختم. /help را بزن.", chat_id)
+        return
+
+    send_telegram("⏳ در حال بررسی منابع به‌روز و تهیه گزارش...", chat_id)
+
+    try:
+        report = generate_report(command_map[text])
+        send_telegram(report, chat_id)
+    except Exception as exc:
+        print(f"OpenAI/report error: {type(exc).__name__}: {exc}", flush=True)
+        send_telegram("⚠️ در تهیه گزارش خطایی رخ داد. چند دقیقه دیگر دوباره امتحان کن.", chat_id)
+
+
+def poll_telegram():
+    offset = None
+    print("CEO Intelligence Telegram bot is running...", flush=True)
+
+    while True:
+        try:
+            params = {"timeout": 50}
+            if offset is not None:
+                params["offset"] = offset
+
+            response = requests.get(
+                f"{TELEGRAM_API}/getUpdates",
+                params=params,
+                timeout=60,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            if not data.get("ok"):
+                print(f"Telegram API error: {data}", flush=True)
+                time.sleep(5)
+                continue
+
+            for update in data.get("result", []):
+                offset = update["update_id"] + 1
+                message = update.get("message")
+                if message:
+                    handle_message(message)
+
+        except requests.RequestException as exc:
+            print(f"Telegram polling error: {exc}", flush=True)
+            time.sleep(5)
+        except Exception as exc:
+            print(f"Unexpected error: {type(exc).__name__}: {exc}", flush=True)
+            time.sleep(5)
 
 
 if __name__ == "__main__":
-    main()
+    poll_telegram()
