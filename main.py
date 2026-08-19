@@ -1,23 +1,19 @@
 import os
 import time
+import json
 import threading
-import requests
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-from openai import OpenAI
 
-VERSION = "CEO-BOT-V2-FAST"
+VERSION = "CEO-BOT-V3-STDLIB"
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
+OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-
-client = OpenAI(
-    api_key=os.environ["OPENAI_API_KEY"],
-    timeout=90.0,
-    max_retries=1,
-)
 
 EXECUTOR = ThreadPoolExecutor(max_workers=4)
 LOCK = threading.Lock()
@@ -75,32 +71,73 @@ For each important item, state: what happened, why it matters, and what to watch
 def build_prompt(section: str) -> str:
     today = datetime.now().strftime("%Y-%m-%d")
     prompts = {
-        "report": f"""Today is {today}. Prepare a compact CEO intelligence brief covering only material developments from the last 24 hours and 7 days. Structure: 🚨 Alerts (max 5), 🇨🇦 Canada, 🏗 Engineering & Construction, 🇮🇷 Iran & Assets, 🌎 Global, 📈 Opportunities, ⚠️ Risks, 🎯 CEO actions (3-5). Keep it under about 900 Persian words.""",
-        "alerts": f"""Today is {today}. Return only the 5-7 most important CEO alerts from the last 24 hours and 7 days affecting Canada, Quebec, BC, Iran, currencies, gold, oil, interest rates, engineering, construction, sanctions or asset values. Ignore routine news. Keep it very concise.""",
-        "canada": f"""Today is {today}. Give a concise Canada/Quebec/BC CEO brief: Bank of Canada, rates, inflation, CAD/USD, housing, construction, permits, infrastructure spending and business conditions. End with 3 CEO implications.""",
-        "iran": f"""Today is {today}. Give a concise Iran asset brief: USD/IRR free market, CAD/IRR if reliable, gold, coins, inflation, monetary policy, real-estate signals, sanctions and geopolitical risk. Clearly separate confirmed data from estimates. End with 3 asset-owner implications.""",
-        "construction": f"""Today is {today}. Give a concise Canadian engineering/construction market brief: structural/civil/geotechnical demand, consulting fees, labour, steel, rebar, concrete, lumber, asphalt, excavation, drilling, surveying, regulations, tenders and technology. End with pricing/business implications.""",
-        "prices": f"""Today is {today}. Create a phone-friendly price dashboard with the latest reliable values/trends for CAD/USD, international gold, USD/IRR free market, Iranian gold/coins if reliable, Bank of Canada rate, oil, and major construction-material trends. Use arrows and percentage changes where available. Use N/A instead of guessing.""",
-        "global": f"""Today is {today}. Give a concise global macro brief only for developments that materially affect Canada, Iran, gold, oil, currencies, rates, engineering demand or construction. Focus on central banks, inflation, oil, gold, geopolitics, sanctions and trade. End with 3 practical implications.""",
-        "opportunities": f"""Today is {today}. Find actionable business opportunities for a Canadian small-to-medium engineering consulting firm offering structural, civil, geotechnical, inspection and rehabilitation services. Prioritize Quebec, BC and major Canadian markets. Rank 5-8 opportunities by attractiveness and give one next action for each.""",
+        "report": f"Today is {today}. Prepare a compact CEO intelligence brief covering only material developments from the last 24 hours and 7 days. Structure: 🚨 Alerts (max 5), 🇨🇦 Canada, 🏗 Engineering & Construction, 🇮🇷 Iran & Assets, 🌎 Global, 📈 Opportunities, ⚠️ Risks, 🎯 CEO actions (3-5). Keep it under about 900 Persian words.",
+        "alerts": f"Today is {today}. Return only the 5-7 most important CEO alerts from the last 24 hours and 7 days affecting Canada, Quebec, BC, Iran, currencies, gold, oil, interest rates, engineering, construction, sanctions or asset values. Ignore routine news. Keep it very concise.",
+        "canada": f"Today is {today}. Give a concise Canada/Quebec/BC CEO brief: Bank of Canada, rates, inflation, CAD/USD, housing, construction, permits, infrastructure spending and business conditions. End with 3 CEO implications.",
+        "iran": f"Today is {today}. Give a concise Iran asset brief: USD/IRR free market, CAD/IRR if reliable, gold, coins, inflation, monetary policy, real-estate signals, sanctions and geopolitical risk. Clearly separate confirmed data from estimates. End with 3 asset-owner implications.",
+        "construction": f"Today is {today}. Give a concise Canadian engineering/construction market brief: structural/civil/geotechnical demand, consulting fees, labour, steel, rebar, concrete, lumber, asphalt, excavation, drilling, surveying, regulations, tenders and technology. End with pricing/business implications.",
+        "prices": f"Today is {today}. Create a phone-friendly price dashboard with the latest reliable values/trends for CAD/USD, international gold, USD/IRR free market, Iranian gold/coins if reliable, Bank of Canada rate, oil, and major construction-material trends. Use arrows and percentage changes where available. Use N/A instead of guessing.",
+        "global": f"Today is {today}. Give a concise global macro brief only for developments that materially affect Canada, Iran, gold, oil, currencies, rates, engineering demand or construction. Focus on central banks, inflation, oil, gold, geopolitics, sanctions and trade. End with 3 practical implications.",
+        "opportunities": f"Today is {today}. Find actionable business opportunities for a Canadian small-to-medium engineering consulting firm offering structural, civil, geotechnical, inspection and rehabilitation services. Prioritize Quebec, BC and major Canadian markets. Rank 5-8 opportunities by attractiveness and give one next action for each.",
     }
     return prompts[section]
 
 
+def http_json(url: str, method: str = "GET", payload=None, headers=None, timeout: int = 30):
+    data = None
+    request_headers = {"User-Agent": "Metra-CEO-Bot/3.0"}
+    if headers:
+        request_headers.update(headers)
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request_headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8")
+    return json.loads(raw)
+
+
+def extract_output_text(response: dict) -> str:
+    pieces = []
+    for item in response.get("output", []):
+        if item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if content.get("type") == "output_text" and content.get("text"):
+                pieces.append(content["text"])
+    if pieces:
+        return "\n".join(pieces).strip()
+    text = response.get("output_text")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return "داده قابل اتکای کافی پیدا نشد."
+
+
 def generate_report(section: str) -> str:
     print(f"[{VERSION}] web job start: {section}", flush=True)
-    response = client.responses.create(
-        model=MODEL,
-        tools=[{"type": "web_search", "search_context_size": "low"}],
-        max_output_tokens=1200,
-        input=[
+    payload = {
+        "model": MODEL,
+        "tools": [{"type": "web_search", "search_context_size": "low"}],
+        "max_output_tokens": 1200,
+        "input": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_prompt(section)},
         ],
+    }
+    response = http_json(
+        "https://api.openai.com/v1/responses",
+        method="POST",
+        payload=payload,
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+        timeout=95,
     )
-    text = response.output_text.strip()
+    text = extract_output_text(response)
     print(f"[{VERSION}] web job done: {section}", flush=True)
     return text
+
+
+def telegram_call(method: str, payload=None, timeout: int = 30):
+    return http_json(f"{TELEGRAM_API}/{method}", method="POST", payload=payload or {}, timeout=timeout)
 
 
 def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID, menu: bool = False):
@@ -109,8 +146,15 @@ def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID, menu: bool = Fa
         payload = {"chat_id": chat_id, "text": chunk}
         if menu and i == len(chunks) - 1:
             payload["reply_markup"] = MAIN_KEYBOARD
-        r = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload, timeout=15)
-        r.raise_for_status()
+        telegram_call("sendMessage", payload, timeout=20)
+
+
+def get_updates(offset=None):
+    params = {"timeout": 25}
+    if offset is not None:
+        params["offset"] = offset
+    qs = urllib.parse.urlencode(params)
+    return http_json(f"{TELEGRAM_API}/getUpdates?{qs}", timeout=35)
 
 
 def cache_read(section: str):
@@ -131,7 +175,7 @@ def time_label(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%H:%M")
 
 
-def background_job(section: str, chat_id: str | None, notify: bool):
+def background_job(section: str, chat_id, notify: bool):
     try:
         text = generate_report(section)
         cache_write(section, text)
@@ -146,7 +190,7 @@ def background_job(section: str, chat_id: str | None, notify: bool):
             RUNNING.discard(section)
 
 
-def start_job(section: str, chat_id: str | None = None, notify: bool = False) -> bool:
+def start_job(section: str, chat_id=None, notify: bool = False) -> bool:
     with LOCK:
         if section in RUNNING:
             return False
@@ -158,29 +202,19 @@ def start_job(section: str, chat_id: str | None = None, notify: bool = False) ->
 def serve(section: str, chat_id: str):
     LAST_SECTION[chat_id] = section
     item, fresh = cache_read(section)
-
     if item and fresh:
         send_telegram(f"⚡ بروزرسانی {time_label(item['time'])}\n\n{item['text']}", chat_id, menu=True)
         return
-
     if item:
         send_telegram(
-            f"⚡ آخرین نسخه موجود ({time_label(item['time'])})\n"
-            "نسخه تازه هم‌زمان در پس‌زمینه در حال آماده‌شدن است.\n\n"
-            + item["text"],
+            f"⚡ آخرین نسخه موجود ({time_label(item['time'])})\nنسخه تازه هم‌زمان در پس‌زمینه در حال آماده‌شدن است.\n\n{item['text']}",
             chat_id,
             menu=True,
         )
         start_job(section, chat_id, notify=True)
         return
-
     if start_job(section, chat_id, notify=True):
-        send_telegram(
-            "⚡ درخواست ثبت شد. لازم نیست منتظر بمانی؛ منو همچنان فعال است.\n"
-            "نتیجه پس از آماده‌شدن خودکار ارسال می‌شود.",
-            chat_id,
-            menu=True,
-        )
+        send_telegram("⚡ درخواست ثبت شد. منو آزاد است و نتیجه پس از آماده‌شدن خودکار ارسال می‌شود.", chat_id, menu=True)
     else:
         send_telegram("⏳ همین بخش الان در حال بروزرسانی است.", chat_id, menu=True)
 
@@ -198,9 +232,7 @@ def handle_message(message: dict):
 
     if low in {"/start", "/help", "hello", "hi"}:
         send_telegram(
-            "⚡ Metra CEO Intelligence — نسخه سریع\n\n"
-            "منو فوری کار می‌کند و گزارش‌ها در پس‌زمینه بروزرسانی می‌شوند.\n"
-            "یکی از دکمه‌ها را انتخاب کن.",
+            "⚡ Metra CEO Intelligence — نسخه سریع\n\nمنو فوری کار می‌کند و گزارش‌ها در پس‌زمینه بروزرسانی می‌شوند.\nیکی از دکمه‌ها را انتخاب کن.",
             chat_id,
             menu=True,
         )
@@ -234,22 +266,14 @@ def polling_loop():
     offset = None
     while True:
         try:
-            params = {"timeout": 25}
-            if offset is not None:
-                params["offset"] = offset
-            r = requests.get(f"{TELEGRAM_API}/getUpdates", params=params, timeout=35)
-            r.raise_for_status()
-            data = r.json()
+            data = get_updates(offset)
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
                 msg = update.get("message")
                 if msg:
                     handle_message(msg)
-        except requests.RequestException as exc:
-            print(f"[{VERSION}] telegram network error: {exc}", flush=True)
-            time.sleep(2)
         except Exception as exc:
-            print(f"[{VERSION}] loop error: {type(exc).__name__}: {exc}", flush=True)
+            print(f"[{VERSION}] telegram loop error: {type(exc).__name__}: {exc}", flush=True)
             time.sleep(2)
 
 
@@ -257,15 +281,13 @@ def startup():
     print(f"[{VERSION}] START", flush=True)
     try:
         send_telegram(
-            "✅ Metra CEO Intelligence V2 فعال شد.\n"
-            "منوی سریع آماده است؛ نیازی به تایپ دستور نیست.",
+            "✅ Metra CEO Intelligence V3 فعال شد.\nمنوی سریع آماده است؛ نیازی به تایپ دستور نیست.",
             TELEGRAM_CHAT_ID,
             menu=True,
         )
     except Exception as exc:
-        print(f"[{VERSION}] startup telegram error: {exc}", flush=True)
+        print(f"[{VERSION}] startup telegram error: {type(exc).__name__}: {exc}", flush=True)
 
-    # Pre-warm the most frequently used sections without blocking Telegram.
     for section in ("prices", "alerts", "report"):
         start_job(section, notify=False)
 
