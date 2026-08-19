@@ -41,19 +41,23 @@ Style:
 """
 
 BUTTON_TO_SECTION = {
-    "🧠 CEO Brief": "report",
-    "🇮🇷 Iran & Assets": "iran",
-    "🇨🇦 Canada": "canada",
-    "🏗 Engineering & Construction": "construction",
-    "📊 Prices & Markets": "prices",
+    "🧠 گزارش کامل CEO": "report",
+    "🚨 هشدارهای مهم": "alerts",
+    "🇨🇦 کانادا": "canada",
+    "🇮🇷 ایران و دارایی‌ها": "iran",
+    "🏗 مهندسی و ساخت‌وساز": "construction",
+    "📊 قیمت‌ها و بازارها": "prices",
+    "🌎 اقتصاد جهانی": "global",
+    "📈 فرصت‌های تجاری": "opportunities",
 }
 
 MAIN_KEYBOARD = {
     "keyboard": [
-        [{"text": "🧠 CEO Brief"}],
-        [{"text": "🇨🇦 Canada"}, {"text": "🇮🇷 Iran & Assets"}],
-        [{"text": "🏗 Engineering & Construction"}],
-        [{"text": "📊 Prices & Markets"}],
+        [{"text": "🧠 گزارش کامل CEO"}, {"text": "🚨 هشدارهای مهم"}],
+        [{"text": "🇨🇦 کانادا"}, {"text": "🇮🇷 ایران و دارایی‌ها"}],
+        [{"text": "🏗 مهندسی و ساخت‌وساز"}],
+        [{"text": "📊 قیمت‌ها و بازارها"}],
+        [{"text": "🌎 اقتصاد جهانی"}, {"text": "📈 فرصت‌های تجاری"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -65,7 +69,7 @@ def build_prompt(section: str) -> str:
 
     if section == "report":
         return f"""
-Today is {today}. Search the web and prepare a current CEO External Intelligence Brief.
+Today is {today}. Search the web and prepare a current CEO External Intelligence Brief in Persian.
 Focus on the last 24 hours and last 7 days.
 
 Use this exact structure:
@@ -92,10 +96,13 @@ Finish with 3 to 7 concrete CEO-level observations or actions.
 """
 
     prompts = {
+        "alerts": f"""Today is {today}. Search the web and produce only the most important CEO alerts in Persian from the last 24 hours and last 7 days. Maximum 7 items. Prioritize material developments affecting Canada, Quebec, BC, Iran, currencies, gold, oil, interest rates, engineering, construction, sanctions, regulations or major asset values. For each alert include: what happened, why it matters, likely impact, and what to watch next. Ignore routine news.""",
         "iran": f"""Today is {today}. Search the web and give me a concise Iran asset intelligence brief in Persian. Focus on USD/IRR free-market rate, gold, coins, inflation, monetary policy, property/real-estate signals, sanctions and geopolitical developments that can materially affect asset values. Separate confirmed data from estimates and explain what matters for an asset owner.""",
         "canada": f"""Today is {today}. Search the web and give me a concise Canada/Quebec/BC CEO intelligence brief in Persian. Focus on Bank of Canada, rates, inflation, CAD/USD, housing, construction, permits, infrastructure spending and business conditions. End with CEO implications.""",
         "construction": f"""Today is {today}. Search the web and give me a concise Canadian engineering and construction market brief in Persian. Focus on structural/civil/geotechnical demand, engineering fees, labour costs, steel, rebar, concrete, lumber, asphalt, excavation, drilling, surveying, regulations, tenders and technologies. End with pricing and business implications.""",
-        "prices": f"""Today is {today}. Search the web and prepare a concise price-and-market dashboard in Persian for a Canadian engineering CEO. Include the latest reliable values/trends available for CAD/USD, international gold, USD/IRR free market, Iranian gold/coins when reliable, Bank of Canada rate, and major construction material price trends. Use N/A rather than inventing data. Show direction arrows and percentage changes when available.""",
+        "prices": f"""Today is {today}. Search the web and prepare a concise price-and-market dashboard in Persian for a Canadian engineering CEO. Include the latest reliable values/trends available for CAD/USD, international gold, USD/IRR free market, Iranian gold/coins when reliable, Bank of Canada rate, oil, and major construction material price trends. Use N/A rather than inventing data. Show direction arrows and percentage changes when available.""",
+        "global": f"""Today is {today}. Search the web and prepare a concise global macroeconomic intelligence brief in Persian. Only include developments that can materially affect Canada, Iran, gold, oil, currencies, interest rates, construction, engineering demand or the CEO's assets. Focus on central banks, inflation, recession risk, oil, gold, geopolitics, sanctions and major trade developments. End with practical CEO implications.""",
+        "opportunities": f"""Today is {today}. Search the web for actionable business opportunities relevant to a Canadian small-to-medium engineering consulting firm providing structural, civil, geotechnical, inspection and rehabilitation services. Prioritize Quebec, British Columbia and major Canadian markets. Look for infrastructure programs, tenders, municipal spending, rehabilitation needs, regulatory changes creating demand, technology opportunities, partnerships and underserved niches. Return a concise Persian list ranked by attractiveness, with why it matters and the next action to investigate.""",
     }
     return prompts[section]
 
@@ -154,10 +161,13 @@ def handle_message(message: dict):
 
     command_map = {
         "/report": "report",
+        "/alerts": "alerts",
         "/iran": "iran",
         "/canada": "canada",
         "/construction": "construction",
         "/prices": "prices",
+        "/global": "global",
+        "/opportunities": "opportunities",
     }
 
     section = BUTTON_TO_SECTION.get(original_text) or command_map.get(text)
@@ -178,7 +188,7 @@ def handle_message(message: dict):
 
 def poll_telegram():
     offset = None
-    print("CEO Intelligence Telegram bot is running with button menu...", flush=True)
+    print("CEO Intelligence Telegram bot is running with Persian button menu...", flush=True)
 
     while True:
         try:
