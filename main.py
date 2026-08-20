@@ -2,34 +2,39 @@ import os
 import time
 import json
 import threading
-import urllib.parse
-import urllib.request
+import io
+import re
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "CEO-BOT-V6-DASHBOARD"
+import requests
+from PIL import Image, ImageDraw, ImageFont
+import arabic_reshaper
+from bidi.algorithm import get_display
+
+VERSION = "CEO-BOT-V7-GRAPHIC"
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
-TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
-EXECUTOR = ThreadPoolExecutor(max_workers=3)
+FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+EXECUTOR = ThreadPoolExecutor(max_workers=2)
 LOCK = threading.Lock()
-CACHE = {}
-RUNNING = set()
-
-MARKETS_TTL = 15 * 60
-FLIGHTS_TTL = 6 * 60 * 60
-ALERTS_TTL = 30 * 60
+SNAPSHOT = None
+SNAPSHOT_TIME = 0
+REFRESHING = False
+TTL = 30 * 60
 
 MAIN_KEYBOARD = {
     "keyboard": [
-        [{"text": "📌 داشبورد فوری"}],
+        [{"text": "📊 داشبورد فوری"}],
         [{"text": "💰 ارز و طلا"}, {"text": "✈️ بلیط‌ها"}],
-        [{"text": "🚨 فقط هشدارها"}],
-        [{"text": "🔄 بروزرسانی"}],
+        [{"text": "🚨 هشدارها"}, {"text": "🔄 بروزرسانی"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -37,253 +42,392 @@ MAIN_KEYBOARD = {
 }
 
 SYSTEM_PROMPT = """
-You are a personal market-and-travel data analyst.
-Write in Persian and optimize for a phone screen.
-Be extremely concise, numerical and practical.
-Never write an essay. Never dump raw URLs.
-Never invent a number. If a current reliable value cannot be verified, write: N/A.
-For Iran exchange rates, use free-market rates, not official rates, and label تومان and ریال clearly.
-For flights, report only fares you can actually verify from current web results; otherwise N/A.
-At the end list only 2-5 source names and a freshness timestamp.
+You are a private market-and-travel data collector for a graphical CEO dashboard.
+Your output will be parsed by software, so return ONLY valid JSON and no markdown.
+Use current web information. Never invent a number. Use null when a value cannot be verified.
+Iran FX must be free-market, with TOMAN as the main display unit.
+For flights, only use currently visible round-trip economy fares for one adult from Montreal YUL.
+Prefer Tehran IKA for Iran. For Vancouver use YVR.
+Keep alerts extremely short and only material.
 """
 
 
 def now_label():
-    return datetime.now().strftime("%Y-%m-%d %H:%M")
+    return datetime.now().strftime("%d %b %Y • %H:%M")
 
 
-def build_prompt(kind: str) -> str:
-    now = now_label()
-    if kind == "markets":
-        return f"""
-Current time: {now}.
-Find and return ONLY this compact dashboard, in this exact order:
-
-💰 بازار — {now}
-🥇 Gold spot: $X/oz | 24h: ±X%
-🇺🇸🇨🇦 USD/CAD: X | 24h: ±X%
-🇨🇦🇺🇸 CAD/USD: X
-🇺🇸🇮🇷 USD/IRR free market: X تومان | X ریال | 24h: ±X%
-🇨🇦🇮🇷 CAD/IRR free market: X تومان | X ریال
-🇮🇷🥇 طلای 18 عیار ایران: X تومان/گرم | 24h: ±X%
-
-📍 فقط اگر قابل اتکا بود: سکه امامی: X تومان
-
+def snapshot_prompt():
+    return f"""
+Current local time: {datetime.now().isoformat(timespec='minutes')}.
+Search current web data and return exactly one JSON object with this schema:
+{{
+  "gold_usd_oz": number|null,
+  "gold_change_pct": number|null,
+  "usd_cad": number|null,
+  "usd_cad_change_pct": number|null,
+  "cad_usd": number|null,
+  "usd_irr_toman": number|null,
+  "usd_irr_change_pct": number|null,
+  "cad_irr_toman": number|null,
+  "cad_irr_change_pct": number|null,
+  "iran_gold18_toman_g": number|null,
+  "iran_gold18_change_pct": number|null,
+  "emami_coin_toman": number|null,
+  "emami_coin_change_pct": number|null,
+  "iran_flight": {{
+    "price_cad": number|null,
+    "outbound": "YYYY-MM-DD"|null,
+    "return": "YYYY-MM-DD"|null,
+    "airline": string|null,
+    "stops": string|null,
+    "source_url": string|null
+  }},
+  "vancouver_flight": {{
+    "price_cad": number|null,
+    "outbound": "YYYY-MM-DD"|null,
+    "return": "YYYY-MM-DD"|null,
+    "airline": string|null,
+    "stops": string|null,
+    "source_url": string|null
+  }},
+  "alerts": [string],
+  "sources": [string]
+}}
 Rules:
-- Use latest available values.
-- Cross-check Iran free-market FX/gold with at least two credible market sources when possible.
-- No economic commentary unless a move is unusually large; then add one short line beginning with ⚠️.
-- Keep under 14 lines total.
+- Gold = current international spot XAU/USD per troy ounce.
+- USD/CAD = 1 USD in CAD; CAD/USD = inverse.
+- Iran FX = current free-market TOMAN values. If CAD/IRR is derived from USD/IRR and USD/CAD, that is acceptable.
+- Iran 18K gold = toman per gram.
+- Flight Iran: cheapest currently visible YUL↔IKA round trip within next 90 days, roughly 7-30 nights.
+- Flight Vancouver: cheapest currently visible YUL↔YVR round trip within next 60 days, roughly 3-7 nights.
+- alerts: maximum 2, each under 55 Persian characters. Empty list if nothing material.
+- sources: names only, maximum 5. No commentary.
 """
-    if kind == "flights":
-        return f"""
-Current time: {now}.
-Search current round-trip economy fares for one adult departing Montreal (YUL).
-Use flexible dates in the next 90 days, trip length roughly 7-21 nights.
-Return ONLY:
-
-✈️ ارزان‌ترین بلیط‌های پیدا‌شده — {now}
-🇮🇷 YUL ↔ Tehran (IKA): C$X | outbound date → return date | airline | stops
-🇨🇦 YUL ↔ Vancouver (YVR): C$X | outbound date → return date | airline | nonstop/stops
-
-If Tehran is not the cheapest practical Iran gateway, you may add one extra line for another major Iran airport only when meaningfully cheaper.
-Do not give estimated fares. If a fare is not currently verifiable, put N/A.
-Keep under 8 lines total.
-"""
-    if kind == "alerts":
-        return f"""
-Current time: {now}.
-Give ONLY high-signal alerts affecting these items: global gold, USD/CAD, Iran free-market USD/IRR, Iran gold, Montreal-Iran airfare, Montreal-Vancouver airfare.
-Maximum 4 alerts. Ignore routine news.
-Each alert must be one short line and explain the practical implication.
-If nothing material changed, write: ✅ فعلاً هشدار مهمی نیست.
-"""
-    raise ValueError(kind)
 
 
-def http_json(url: str, method: str = "GET", payload=None, headers=None, timeout: int = 30):
-    data = None
-    request_headers = {"User-Agent": "Metra-CEO-Bot/6.0"}
-    if headers:
-        request_headers.update(headers)
-    if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        request_headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def parse_json_text(text: str) -> dict:
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
 
 
-def extract_output_text(response: dict) -> str:
-    pieces = []
-    for item in response.get("output", []):
-        if item.get("type") == "message":
-            for content in item.get("content", []):
-                text = content.get("text")
-                if isinstance(text, str) and text.strip():
-                    pieces.append(text.strip())
-    if pieces:
-        return "\n".join(pieces)
-    top = response.get("output_text")
-    return top.strip() if isinstance(top, str) else ""
-
-
-def call_openai(kind: str) -> str:
+def call_openai_snapshot() -> dict:
     payload = {
         "model": MODEL,
         "tools": [{"type": "web_search"}],
         "reasoning": {"effort": "low"},
-        "max_output_tokens": 1600,
+        "max_output_tokens": 2200,
         "instructions": SYSTEM_PROMPT,
-        "input": build_prompt(kind),
+        "input": snapshot_prompt(),
     }
-    response = http_json(
+    r = requests.post(
         "https://api.openai.com/v1/responses",
-        method="POST",
-        payload=payload,
-        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-        timeout=100,
+        headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=110,
     )
-    text = extract_output_text(response)
+    r.raise_for_status()
+    data = r.json()
+    parts = []
+    for item in data.get("output", []):
+        if item.get("type") == "message":
+            for c in item.get("content", []):
+                if isinstance(c.get("text"), str):
+                    parts.append(c["text"])
+    text = "\n".join(parts).strip() or str(data.get("output_text", "")).strip()
     if not text:
-        raise RuntimeError("empty OpenAI response")
-    return text
+        raise RuntimeError("OpenAI returned empty snapshot")
+    return parse_json_text(text)
 
 
-def telegram_call(method: str, payload=None, timeout: int = 30):
-    return http_json(f"{TELEGRAM_API}/{method}", method="POST", payload=payload or {}, timeout=timeout)
+def telegram_send_message(text: str, chat_id=TELEGRAM_CHAT_ID, menu=True):
+    payload = {"chat_id": chat_id, "text": text}
+    if menu:
+        payload["reply_markup"] = json.dumps(MAIN_KEYBOARD, ensure_ascii=False)
+    r = requests.post(f"{TELEGRAM_API}/sendMessage", data=payload, timeout=25)
+    r.raise_for_status()
 
 
-def send_telegram(message: str, chat_id: str = TELEGRAM_CHAT_ID, menu: bool = False):
-    chunks = [message[i:i + 3800] for i in range(0, len(message), 3800)] or [""]
-    for i, chunk in enumerate(chunks):
-        payload = {"chat_id": chat_id, "text": chunk}
-        if menu and i == len(chunks) - 1:
-            payload["reply_markup"] = MAIN_KEYBOARD
-        telegram_call("sendMessage", payload, timeout=20)
+def telegram_send_photo(image_bytes: bytes, caption: str = "", chat_id=TELEGRAM_CHAT_ID, inline_keyboard=None):
+    data = {"chat_id": chat_id, "caption": caption}
+    if inline_keyboard:
+        data["reply_markup"] = json.dumps({"inline_keyboard": inline_keyboard}, ensure_ascii=False)
+    files = {"photo": ("dashboard.png", image_bytes, "image/png")}
+    r = requests.post(f"{TELEGRAM_API}/sendPhoto", data=data, files=files, timeout=35)
+    r.raise_for_status()
 
 
 def get_updates(offset=None):
     params = {"timeout": 25}
     if offset is not None:
         params["offset"] = offset
-    return http_json(f"{TELEGRAM_API}/getUpdates?{urllib.parse.urlencode(params)}", timeout=35)
+    r = requests.get(f"{TELEGRAM_API}/getUpdates", params=params, timeout=35)
+    r.raise_for_status()
+    return r.json()
 
 
-def ttl_for(kind: str) -> int:
-    return {"markets": MARKETS_TTL, "flights": FLIGHTS_TTL, "alerts": ALERTS_TTL}[kind]
+def font(size, bold=False):
+    return ImageFont.truetype(FONT_BOLD if bold else FONT_REG, size)
 
 
-def cache_get(kind: str):
-    with LOCK:
-        item = CACHE.get(kind)
-    if not item:
-        return None, False
-    return item, (time.time() - item["time"] <= ttl_for(kind))
-
-
-def cache_put(kind: str, text: str):
-    with LOCK:
-        CACHE[kind] = {"text": text, "time": time.time()}
-
-
-def refresh_job(kind: str, notify_chat=None):
+def rtl(text):
+    if text is None:
+        return ""
+    s = str(text)
     try:
-        print(f"[{VERSION}] refresh start {kind}", flush=True)
-        text = call_openai(kind)
-        cache_put(kind, text)
-        print(f"[{VERSION}] refresh done {kind}", flush=True)
+        return get_display(arabic_reshaper.reshape(s))
+    except Exception:
+        return s
+
+
+def fmt_num(value, decimals=0):
+    if value is None:
+        return "N/A"
+    try:
+        n = float(value)
+        if decimals:
+            return f"{n:,.{decimals}f}"
+        return f"{n:,.0f}"
+    except Exception:
+        return str(value)
+
+
+def fmt_pct(value):
+    if value is None:
+        return ""
+    try:
+        v = float(value)
+        arrow = "▲" if v > 0 else "▼" if v < 0 else "→"
+        return f"{arrow} {v:+.2f}%"
+    except Exception:
+        return ""
+
+
+def color_for_change(value):
+    try:
+        v = float(value)
+        if v > 0:
+            return (34, 214, 110)
+        if v < 0:
+            return (255, 72, 72)
+    except Exception:
+        pass
+    return (160, 170, 180)
+
+
+def rounded(draw, box, radius=24, fill=(12, 22, 31), outline=(45, 65, 78), width=2):
+    draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
+
+
+def center_text(draw, box, text, fnt, fill):
+    x1, y1, x2, y2 = box
+    b = draw.textbbox((0, 0), text, font=fnt)
+    w = b[2] - b[0]
+    h = b[3] - b[1]
+    draw.text(((x1 + x2 - w) / 2, (y1 + y2 - h) / 2), text, font=fnt, fill=fill)
+
+
+def card_metric(draw, box, title, value, subtitle="", change=None, accent=(46, 204, 113)):
+    rounded(draw, box, fill=(10, 19, 27), outline=accent, width=2)
+    x1, y1, x2, y2 = box
+    draw.text((x1 + 22, y1 + 18), rtl(title), font=font(27, True), fill=(236, 241, 245))
+    draw.text((x1 + 22, y1 + 65), value, font=font(43, True), fill=(245, 248, 250))
+    if subtitle:
+        draw.text((x1 + 22, y1 + 120), rtl(subtitle), font=font(22), fill=(165, 178, 190))
+    if change is not None:
+        draw.text((x1 + 22, y2 - 42), fmt_pct(change), font=font(22, True), fill=color_for_change(change))
+
+
+def flight_card(draw, box, title, flight, accent):
+    rounded(draw, box, fill=(9, 20, 30), outline=accent, width=2)
+    x1, y1, x2, y2 = box
+    draw.text((x1 + 22, y1 + 18), rtl(title), font=font(27, True), fill=(238, 243, 247))
+    price = flight.get("price_cad") if isinstance(flight, dict) else None
+    draw.text((x1 + 22, y1 + 70), f"C${fmt_num(price)}" if price is not None else "N/A", font=font(46, True), fill=accent)
+    out = (flight or {}).get("outbound") or "—"
+    ret = (flight or {}).get("return") or "—"
+    draw.text((x1 + 22, y1 + 132), f"{out}  →  {ret}", font=font(22), fill=(220, 226, 231))
+    airline = (flight or {}).get("airline") or "N/A"
+    stops = (flight or {}).get("stops") or "N/A"
+    draw.text((x1 + 22, y1 + 171), f"{airline}  •  {stops}", font=font(20), fill=(164, 178, 190))
+
+
+def render_dashboard(snapshot: dict) -> bytes:
+    W, H = 1080, 1500
+    img = Image.new("RGB", (W, H), (4, 10, 16))
+    d = ImageDraw.Draw(img)
+
+    d.text((48, 34), "METRA", font=font(44, True), fill=(242, 245, 247))
+    d.text((48, 82), "CEO DASHBOARD", font=font(23, True), fill=(46, 204, 113))
+    d.text((525, 48), now_label(), font=font(23), fill=(190, 201, 210))
+    rounded(d, (885, 34, 1035, 88), radius=18, fill=(8, 42, 28), outline=(46, 204, 113), width=2)
+    center_text(d, (885, 34, 1035, 88), "● LIVE", font(24, True), (46, 204, 113))
+
+    card_metric(d, (40, 145, 360, 420), "🥇 طلای جهانی", f"${fmt_num(snapshot.get('gold_usd_oz'))}", "هر اونس", snapshot.get("gold_change_pct"), (232, 170, 32))
+    card_metric(d, (380, 145, 700, 420), "🇺🇸 USD / CAD 🇨🇦", fmt_num(snapshot.get("usd_cad"), 4), "", snapshot.get("usd_cad_change_pct"), (34, 214, 110))
+    card_metric(d, (720, 145, 1040, 420), "🇨🇦 CAD / USD 🇺🇸", fmt_num(snapshot.get("cad_usd"), 4), "", None, (54, 130, 220))
+
+    card_metric(d, (40, 445, 280, 700), "🇺🇸 USD / IRR", fmt_num(snapshot.get("usd_irr_toman")), "تومان", snapshot.get("usd_irr_change_pct"), (54, 130, 220))
+    card_metric(d, (300, 445, 540, 700), "🇨🇦 CAD / IRR", fmt_num(snapshot.get("cad_irr_toman")), "تومان", snapshot.get("cad_irr_change_pct"), (54, 130, 220))
+    card_metric(d, (560, 445, 800, 700), "🥇 طلای 18 عیار", fmt_num(snapshot.get("iran_gold18_toman_g")), "تومان / گرم", snapshot.get("iran_gold18_change_pct"), (34, 214, 110))
+    card_metric(d, (820, 445, 1040, 700), "🪙 سکه امامی", fmt_num(snapshot.get("emami_coin_toman")), "تومان", snapshot.get("emami_coin_change_pct"), (34, 214, 110))
+
+    d.text((46, 740), rtl("✈️ ارزان‌ترین بلیت رفت و برگشت"), font=font(31, True), fill=(242, 245, 247))
+    flight_card(d, (40, 800, 520, 1085), "🇮🇷 مونترال ⇄ تهران", snapshot.get("iran_flight") or {}, (56, 139, 253))
+    flight_card(d, (560, 800, 1040, 1085), "🇨🇦 مونترال ⇄ ونکوور", snapshot.get("vancouver_flight") or {}, (34, 214, 110))
+
+    rounded(d, (40, 1120, 1040, 1310), fill=(8, 18, 25), outline=(44, 60, 72), width=2)
+    d.text((64, 1143), rtl("🔔 هشدارهای مهم"), font=font(29, True), fill=(242, 245, 247))
+    alerts = snapshot.get("alerts") or []
+    if not alerts:
+        d.text((64, 1202), rtl("مورد مهمی وجود ندارد."), font=font(25), fill=(34, 214, 110))
+    else:
+        y = 1195
+        for a in alerts[:2]:
+            d.text((64, y), rtl("• " + str(a)), font=font(23), fill=(225, 230, 235))
+            y += 48
+
+    sources = ", ".join((snapshot.get("sources") or [])[:4])
+    d.text((48, 1360), rtl("آخرین بروزرسانی:"), font=font(20), fill=(140, 154, 165))
+    d.text((220, 1360), now_label(), font=font(20), fill=(180, 192, 201))
+    if sources:
+        d.text((48, 1400), "Sources: " + sources[:95], font=font(18), fill=(120, 135, 148))
+    d.text((48, 1450), rtl("داده‌ها هر 30 دقیقه بروزرسانی می‌شوند."), font=font(19), fill=(120, 135, 148))
+
+    out = io.BytesIO()
+    img.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def build_inline_keyboard(snapshot):
+    rows = []
+    iran_url = ((snapshot.get("iran_flight") or {}).get("source_url"))
+    van_url = ((snapshot.get("vancouver_flight") or {}).get("source_url"))
+    row = []
+    if iran_url and isinstance(iran_url, str) and iran_url.startswith("http"):
+        row.append({"text": "✈️ مشاهده بلیت تهران", "url": iran_url})
+    if van_url and isinstance(van_url, str) and van_url.startswith("http"):
+        row.append({"text": "✈️ مشاهده بلیت ونکوور", "url": van_url})
+    if row:
+        rows.append(row)
+    return rows
+
+
+def cache_get():
+    with LOCK:
+        return SNAPSHOT, SNAPSHOT_TIME
+
+
+def refresh_snapshot(notify_chat=None):
+    global SNAPSHOT, SNAPSHOT_TIME, REFRESHING
+    try:
+        print(f"[{VERSION}] refresh start", flush=True)
+        data = call_openai_snapshot()
+        with LOCK:
+            SNAPSHOT = data
+            SNAPSHOT_TIME = time.time()
+        print(f"[{VERSION}] refresh done", flush=True)
         if notify_chat:
-            send_telegram(text, notify_chat, menu=True)
+            telegram_send_photo(render_dashboard(data), "📊 داشبورد بروزرسانی شد", notify_chat, build_inline_keyboard(data))
     except Exception as exc:
-        print(f"[{VERSION}] refresh error {kind}: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[{VERSION}] refresh error: {type(exc).__name__}: {exc}", flush=True)
         if notify_chat:
-            send_telegram("⚠️ بروزرسانی کامل نشد؛ آخرین داده ذخیره‌شده همچنان قابل استفاده است.", notify_chat, menu=True)
+            telegram_send_message("⚠️ بروزرسانی کامل نشد؛ آخرین داشبورد ذخیره‌شده همچنان قابل استفاده است.", notify_chat)
     finally:
         with LOCK:
-            RUNNING.discard(kind)
+            REFRESHING = False
 
 
-def start_refresh(kind: str, notify_chat=None) -> bool:
+def start_refresh(notify_chat=None):
+    global REFRESHING
     with LOCK:
-        if kind in RUNNING:
+        if REFRESHING:
             return False
-        RUNNING.add(kind)
-    EXECUTOR.submit(refresh_job, kind, notify_chat)
+        REFRESHING = True
+    EXECUTOR.submit(refresh_snapshot, notify_chat)
     return True
 
 
-def render_cached(kind: str, chat_id: str):
-    item, fresh = cache_get(kind)
-    if item:
-        age = int((time.time() - item["time"]) / 60)
-        suffix = "" if fresh else f"\n\n⏱ داده {age} دقیقه قبل است؛ بروزرسانی در پس‌زمینه شروع شد."
-        send_telegram(item["text"] + suffix, chat_id, menu=True)
-        if not fresh:
-            start_refresh(kind)
+def send_dashboard(chat_id):
+    snap, ts = cache_get()
+    if snap:
+        telegram_send_photo(render_dashboard(snap), "", chat_id, build_inline_keyboard(snap))
+        if time.time() - ts > TTL:
+            start_refresh()
+    else:
+        start_refresh(chat_id)
+        telegram_send_message("⏳ داشبورد اولیه در حال آماده‌شدن است؛ نتیجه خودکار به‌صورت کارت گرافیکی ارسال می‌شود.", chat_id)
+
+
+def send_compact(kind, chat_id):
+    snap, _ = cache_get()
+    if not snap:
+        start_refresh(chat_id)
+        telegram_send_message("⏳ داده اولیه در حال آماده‌شدن است.", chat_id)
         return
-    start_refresh(kind, notify_chat=chat_id)
-    send_telegram("⏳ اولین داده در حال آماده‌شدن است. نتیجه خودکار ارسال می‌شود؛ منو همچنان آزاد است.", chat_id, menu=True)
+    if kind == "markets":
+        text = (
+            f"🥇 Gold  ${fmt_num(snap.get('gold_usd_oz'))}  {fmt_pct(snap.get('gold_change_pct'))}\n"
+            f"🇺🇸 USD/CAD  {fmt_num(snap.get('usd_cad'), 4)}\n"
+            f"🇺🇸 USD  {fmt_num(snap.get('usd_irr_toman'))} تومان\n"
+            f"🇨🇦 CAD  {fmt_num(snap.get('cad_irr_toman'))} تومان\n"
+            f"🥇 18K  {fmt_num(snap.get('iran_gold18_toman_g'))} تومان/گرم"
+        )
+    elif kind == "flights":
+        i = snap.get("iran_flight") or {}
+        v = snap.get("vancouver_flight") or {}
+        text = (
+            f"🇮🇷 تهران  C${fmt_num(i.get('price_cad'))}  | {i.get('outbound') or '—'} → {i.get('return') or '—'}\n"
+            f"🇨🇦 ونکوور  C${fmt_num(v.get('price_cad'))}  | {v.get('outbound') or '—'} → {v.get('return') or '—'}"
+        )
+    else:
+        alerts = snap.get("alerts") or []
+        text = "✅ فعلاً هشدار مهمی نیست." if not alerts else "🚨 " + "\n🚨 ".join(alerts[:2])
+    telegram_send_message(text, chat_id)
 
 
-def render_dashboard(chat_id: str):
-    m, _ = cache_get("markets")
-    f, _ = cache_get("flights")
-    a, _ = cache_get("alerts")
-    if not any([m, f, a]):
-        for kind in ("markets", "flights", "alerts"):
-            start_refresh(kind)
-        send_telegram("⏳ داشبورد اولیه در حال آماده‌شدن است. چند لحظه بعد دوباره «📌 داشبورد فوری» را بزن.", chat_id, menu=True)
-        return
-    parts = [x["text"] for x in (m, f, a) if x]
-    send_telegram("\n\n".join(parts), chat_id, menu=True)
-    for kind in ("markets", "flights", "alerts"):
-        item, fresh = cache_get(kind)
-        if not item or not fresh:
-            start_refresh(kind)
-
-
-def handle_message(message: dict):
+def handle_message(message):
     chat_id = str(message.get("chat", {}).get("id", ""))
     if not chat_id:
         return
     if chat_id != TELEGRAM_CHAT_ID:
-        send_telegram("این ربات خصوصی است.", chat_id)
+        telegram_send_message("این ربات خصوصی است.", chat_id, menu=False)
         return
-
     raw = (message.get("text") or "").strip()
     low = raw.lower()
-
     if low in {"/start", "/help", "hello", "hi"}:
-        send_telegram(
-            "⚡ داشبورد شخصی بازار و سفر\n\nفقط قیمت‌ها، بلیت‌ها و هشدارهای مهم. گزارش طولانی حذف شده است.",
-            chat_id,
-            menu=True,
-        )
-    elif raw == "📌 داشبورد فوری" or low == "/dashboard":
-        render_dashboard(chat_id)
+        telegram_send_message("📊 Metra CEO Dashboard\nنسخه گرافیکی آماده است. «داشبورد فوری» را بزن.", chat_id)
+    elif raw == "📊 داشبورد فوری" or low == "/dashboard":
+        send_dashboard(chat_id)
     elif raw == "💰 ارز و طلا" or low == "/markets":
-        render_cached("markets", chat_id)
+        send_compact("markets", chat_id)
     elif raw == "✈️ بلیط‌ها" or low == "/flights":
-        render_cached("flights", chat_id)
-    elif raw == "🚨 فقط هشدارها" or low == "/alerts":
-        render_cached("alerts", chat_id)
+        send_compact("flights", chat_id)
+    elif raw == "🚨 هشدارها" or low == "/alerts":
+        send_compact("alerts", chat_id)
     elif raw == "🔄 بروزرسانی" or low == "/refresh":
-        started = 0
-        for kind in ("markets", "flights", "alerts"):
-            started += 1 if start_refresh(kind) else 0
-        send_telegram(f"🔄 بروزرسانی در پس‌زمینه شروع شد ({started} بخش). منو قفل نمی‌شود.", chat_id, menu=True)
+        if start_refresh(chat_id):
+            telegram_send_message("🔄 بروزرسانی شروع شد؛ نتیجه جدید خودکار به صورت داشبورد گرافیکی می‌آید.", chat_id)
+        else:
+            telegram_send_message("⏳ بروزرسانی همین الان در حال اجراست.", chat_id)
     else:
-        send_telegram("یکی از دکمه‌های منو را انتخاب کن.", chat_id, menu=True)
+        telegram_send_message("یکی از دکمه‌ها را انتخاب کن.", chat_id)
 
 
 def scheduler_loop():
     while True:
         try:
-            for kind in ("markets", "flights", "alerts"):
-                item, fresh = cache_get(kind)
-                if not item or not fresh:
-                    start_refresh(kind)
+            snap, ts = cache_get()
+            if not snap or time.time() - ts > TTL:
+                start_refresh()
         except Exception as exc:
             print(f"[{VERSION}] scheduler error: {exc}", flush=True)
         time.sleep(60)
@@ -297,9 +441,8 @@ def polling_loop():
             data = get_updates(offset)
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
-                msg = update.get("message")
-                if msg:
-                    handle_message(msg)
+                if update.get("message"):
+                    handle_message(update["message"])
         except Exception as exc:
             print(f"[{VERSION}] telegram loop error: {type(exc).__name__}: {exc}", flush=True)
             time.sleep(2)
@@ -308,12 +451,11 @@ def polling_loop():
 def startup():
     print(f"[{VERSION}] START", flush=True)
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    for kind in ("markets", "flights", "alerts"):
-        start_refresh(kind)
+    start_refresh()
     try:
-        send_telegram("✅ نسخه V6 فعال شد — داشبورد سریع و پالایش‌شده آماده است.", TELEGRAM_CHAT_ID, menu=True)
+        telegram_send_message("✅ V7 فعال شد — داشبورد گرافیکی آماده است.", TELEGRAM_CHAT_ID)
     except Exception as exc:
-        print(f"[{VERSION}] startup telegram error: {type(exc).__name__}: {exc}", flush=True)
+        print(f"[{VERSION}] startup message error: {exc}", flush=True)
     polling_loop()
 
 
