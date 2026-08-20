@@ -7,7 +7,7 @@ import urllib.request
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "CEO-BOT-V3-STDLIB"
+VERSION = "CEO-BOT-V4-FAST"
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
@@ -62,7 +62,7 @@ You are the external intelligence analyst for the CEO of a Canadian engineering 
 Write in Persian. Be concise, numerical, neutral and decision-oriented.
 Use current web information and prioritize government, central bank, regulator, statistics, professional engineering and reputable financial/industry sources.
 Never invent a price or statistic. Distinguish Iran free-market rates from official rates. Cross-check Iran figures when possible.
-Do not dump raw URLs in the body. Name sources briefly at the end.
+Do not dump raw URLs in the body. Name 3-8 key sources briefly at the end.
 Keep each section compact enough to read on a phone.
 For each important item, state: what happened, why it matters, and what to watch next.
 """
@@ -85,7 +85,7 @@ def build_prompt(section: str) -> str:
 
 def http_json(url: str, method: str = "GET", payload=None, headers=None, timeout: int = 30):
     data = None
-    request_headers = {"User-Agent": "Metra-CEO-Bot/3.0"}
+    request_headers = {"User-Agent": "Metra-CEO-Bot/4.0"}
     if headers:
         request_headers.update(headers)
     if payload is not None:
@@ -93,46 +93,79 @@ def http_json(url: str, method: str = "GET", payload=None, headers=None, timeout
         request_headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=request_headers, method=method)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8")
-    return json.loads(raw)
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def extract_output_text(response: dict) -> str:
+    # Standard Responses API message output.
     pieces = []
     for item in response.get("output", []):
-        if item.get("type") != "message":
-            continue
-        for content in item.get("content", []):
-            if content.get("type") == "output_text" and content.get("text"):
-                pieces.append(content["text"])
+        if item.get("type") == "message":
+            for content in item.get("content", []):
+                text = content.get("text")
+                if isinstance(text, str) and text.strip():
+                    pieces.append(text.strip())
     if pieces:
-        return "\n".join(pieces).strip()
-    text = response.get("output_text")
-    if isinstance(text, str) and text.strip():
-        return text.strip()
-    return "داده قابل اتکای کافی پیدا نشد."
+        return "\n".join(pieces)
+
+    # Defensive fallback for future/alternate response shapes.
+    top = response.get("output_text")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+
+    def walk(obj):
+        found = []
+        if isinstance(obj, dict):
+            if obj.get("type") == "output_text" and isinstance(obj.get("text"), str):
+                found.append(obj["text"])
+            for value in obj.values():
+                found.extend(walk(value))
+        elif isinstance(obj, list):
+            for value in obj:
+                found.extend(walk(value))
+        return found
+
+    nested = [x.strip() for x in walk(response) if isinstance(x, str) and x.strip()]
+    return "\n".join(dict.fromkeys(nested))
 
 
-def generate_report(section: str) -> str:
-    print(f"[{VERSION}] web job start: {section}", flush=True)
+def call_openai(section: str, max_tokens: int) -> dict:
+    # Keep the payload close to the official Responses API web-search quickstart.
     payload = {
         "model": MODEL,
-        "tools": [{"type": "web_search", "search_context_size": "low"}],
-        "max_output_tokens": 1200,
-        "input": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_prompt(section)},
-        ],
+        "tools": [{"type": "web_search"}],
+        "reasoning": {"effort": "low"},
+        "max_output_tokens": max_tokens,
+        "instructions": SYSTEM_PROMPT,
+        "input": build_prompt(section),
     }
-    response = http_json(
+    return http_json(
         "https://api.openai.com/v1/responses",
         method="POST",
         payload=payload,
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-        timeout=95,
+        timeout=110,
     )
+
+
+def generate_report(section: str) -> str:
+    print(f"[{VERSION}] web job start: {section}", flush=True)
+    response = call_openai(section, 2600)
     text = extract_output_text(response)
-    print(f"[{VERSION}] web job done: {section}", flush=True)
+
+    # GPT-5 output budget includes reasoning tokens. If the first response used its
+    # budget before producing visible text, retry once with a larger budget.
+    if not text:
+        status = response.get("status")
+        details = response.get("incomplete_details")
+        print(f"[{VERSION}] empty output: section={section} status={status} details={details}", flush=True)
+        response = call_openai(section, 4200)
+        text = extract_output_text(response)
+
+    if not text:
+        raise RuntimeError("OpenAI returned no visible report text after retry")
+
+    print(f"[{VERSION}] web job done: {section} chars={len(text)}", flush=True)
     return text
 
 
@@ -153,8 +186,7 @@ def get_updates(offset=None):
     params = {"timeout": 25}
     if offset is not None:
         params["offset"] = offset
-    qs = urllib.parse.urlencode(params)
-    return http_json(f"{TELEGRAM_API}/getUpdates?{qs}", timeout=35)
+    return http_json(f"{TELEGRAM_API}/getUpdates?{urllib.parse.urlencode(params)}", timeout=35)
 
 
 def cache_read(section: str):
@@ -162,8 +194,7 @@ def cache_read(section: str):
         item = CACHE.get(section)
         if not item:
             return None, False
-        fresh = time.time() - item["time"] <= CACHE_TTL[section]
-        return item, fresh
+        return item, time.time() - item["time"] <= CACHE_TTL[section]
 
 
 def cache_write(section: str, text: str):
@@ -206,11 +237,7 @@ def serve(section: str, chat_id: str):
         send_telegram(f"⚡ بروزرسانی {time_label(item['time'])}\n\n{item['text']}", chat_id, menu=True)
         return
     if item:
-        send_telegram(
-            f"⚡ آخرین نسخه موجود ({time_label(item['time'])})\nنسخه تازه هم‌زمان در پس‌زمینه در حال آماده‌شدن است.\n\n{item['text']}",
-            chat_id,
-            menu=True,
-        )
+        send_telegram(f"⚡ آخرین نسخه موجود ({time_label(item['time'])})\nنسخه تازه هم‌زمان در پس‌زمینه در حال آماده‌شدن است.\n\n{item['text']}", chat_id, menu=True)
         start_job(section, chat_id, notify=True)
         return
     if start_job(section, chat_id, notify=True):
@@ -231,28 +258,23 @@ def handle_message(message: dict):
     low = raw.lower()
 
     if low in {"/start", "/help", "hello", "hi"}:
-        send_telegram(
-            "⚡ Metra CEO Intelligence — نسخه سریع\n\nمنو فوری کار می‌کند و گزارش‌ها در پس‌زمینه بروزرسانی می‌شوند.\nیکی از دکمه‌ها را انتخاب کن.",
-            chat_id,
-            menu=True,
-        )
+        send_telegram("⚡ Metra CEO Intelligence — نسخه سریع\n\nمنو فوری کار می‌کند و گزارش‌ها در پس‌زمینه بروزرسانی می‌شوند.\nیکی از دکمه‌ها را انتخاب کن.", chat_id, menu=True)
         return
 
     if raw == "🔄 بروزرسانی زنده":
         section = LAST_SECTION.get(chat_id)
         if not section:
             send_telegram("اول یکی از بخش‌ها را انتخاب کن.", chat_id, menu=True)
-            return
-        if start_job(section, chat_id, notify=True):
+        elif start_job(section, chat_id, notify=True):
             send_telegram("🔄 بروزرسانی زنده شروع شد. منو همچنان آزاد است.", chat_id, menu=True)
         else:
             send_telegram("⏳ همین بخش الان در حال بروزرسانی است.", chat_id, menu=True)
         return
 
     commands = {
-        "/report": "report", "/alerts": "alerts", "/canada": "canada",
-        "/iran": "iran", "/construction": "construction", "/prices": "prices",
-        "/global": "global", "/opportunities": "opportunities",
+        "/report": "report", "/alerts": "alerts", "/canada": "canada", "/iran": "iran",
+        "/construction": "construction", "/prices": "prices", "/global": "global",
+        "/opportunities": "opportunities",
     }
     section = BUTTON_TO_SECTION.get(raw) or commands.get(low)
     if section:
@@ -280,15 +302,12 @@ def polling_loop():
 def startup():
     print(f"[{VERSION}] START", flush=True)
     try:
-        send_telegram(
-            "✅ Metra CEO Intelligence V3 فعال شد.\nمنوی سریع آماده است؛ نیازی به تایپ دستور نیست.",
-            TELEGRAM_CHAT_ID,
-            menu=True,
-        )
+        send_telegram("✅ Metra CEO Intelligence V4 فعال شد.\nمنوی سریع آماده است.", TELEGRAM_CHAT_ID, menu=True)
     except Exception as exc:
         print(f"[{VERSION}] startup telegram error: {type(exc).__name__}: {exc}", flush=True)
 
-    for section in ("prices", "alerts", "report"):
+    # Warm only the two most frequently used dashboards to keep startup light.
+    for section in ("prices", "alerts"):
         start_job(section, notify=False)
 
     polling_loop()
