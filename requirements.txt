@@ -3,3 +3,6 @@ requests
 python-dotenv
 feedparser
 beautifulsoup4
+Pillow
+arabic-reshaper
+python-bidi
