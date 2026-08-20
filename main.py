@@ -7,45 +7,29 @@ import urllib.request
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "CEO-BOT-V5-MARKETS-TRAVEL"
+VERSION = "CEO-BOT-V6-DASHBOARD"
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
-HOME_AIRPORT = os.environ.get("HOME_AIRPORT", "YUL")
 
-EXECUTOR = ThreadPoolExecutor(max_workers=4)
+EXECUTOR = ThreadPoolExecutor(max_workers=3)
 LOCK = threading.Lock()
 CACHE = {}
 RUNNING = set()
-LAST_SECTION = {}
 
-CACHE_TTL = {
-    "dashboard": 900,
-    "markets": 600,
-    "iran": 600,
-    "flight_iran": 7200,
-    "flight_vancouver": 3600,
-    "alerts": 900,
-}
-
-BUTTON_TO_SECTION = {
-    "📌 داشبورد من": "dashboard",
-    "💰 ارز و طلا": "markets",
-    "🇮🇷 بازار ایران": "iran",
-    "✈️ ارزان‌ترین ایران": "flight_iran",
-    "✈️ ارزان‌ترین ونکوور": "flight_vancouver",
-    "🚨 هشدارهای مهم": "alerts",
-}
+MARKETS_TTL = 15 * 60
+FLIGHTS_TTL = 6 * 60 * 60
+ALERTS_TTL = 30 * 60
 
 MAIN_KEYBOARD = {
     "keyboard": [
-        [{"text": "📌 داشبورد من"}],
-        [{"text": "💰 ارز و طلا"}, {"text": "🇮🇷 بازار ایران"}],
-        [{"text": "✈️ ارزان‌ترین ایران"}, {"text": "✈️ ارزان‌ترین ونکوور"}],
-        [{"text": "🚨 هشدارهای مهم"}, {"text": "🔄 بروزرسانی زنده"}],
+        [{"text": "📌 داشبورد فوری"}],
+        [{"text": "💰 ارز و طلا"}, {"text": "✈️ بلیط‌ها"}],
+        [{"text": "🚨 فقط هشدارها"}],
+        [{"text": "🔄 بروزرسانی"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -53,144 +37,73 @@ MAIN_KEYBOARD = {
 }
 
 SYSTEM_PROMPT = """
-You are a private market-and-travel intelligence assistant.
-Write in Persian, optimized for a phone screen. Be concise, numerical, practical and heavily filtered.
-The user does NOT want a broad news report. Only return information directly useful for money, assets, exchange rates, gold, travel prices, or a major risk/opportunity.
-
-DATA RULES
-- Use current web information.
-- Never invent a price, rate, fare, date, percentage or source.
-- For time-sensitive numbers, state the observation time/date when available.
-- Prefer primary or well-established sources.
-- For USD/CAD prefer Bank of Canada or established FX sources.
-- For international gold prefer reputable market data sources.
-- For Iran free-market FX and gold, cross-check when possible using reputable Iranian market sources such as TGJU and Bonbast; clearly distinguish free-market from official rates.
-- Iran everyday prices should show TOMAN first and RIAL second when useful.
-- If CAD/IRR is derived from USD/IRR and USD/CAD rather than directly quoted, label it clearly as «محاسبه‌ای» and show the formula conceptually.
-- For flights, never call something «cheapest» unless a current searchable fare with route/dates is actually visible. If dynamic fare data is unavailable, say «قیمت قابل تأیید پیدا نشد» rather than guessing.
-- For flights include total round-trip price in CAD, origin/destination airports, outbound/return dates, airline(s), stops, and where the fare was found. Mention baggage only if verified.
-- Do not fill space with GDP, routine politics, housing statistics, construction permits, or generic macro commentary unless there is a material direct effect on the tracked items.
-- Avoid raw URL dumps. Give short source names at the end.
-
-STYLE
-- Use short lines and compact bullets.
-- Put the number first.
-- Use ▲ ▼ → only when direction is supported by data.
-- Maximum 1-3 short sentences of interpretation after the numbers.
+You are a personal market-and-travel data analyst.
+Write in Persian and optimize for a phone screen.
+Be extremely concise, numerical and practical.
+Never write an essay. Never dump raw URLs.
+Never invent a number. If a current reliable value cannot be verified, write: N/A.
+For Iran exchange rates, use free-market rates, not official rates, and label تومان and ریال clearly.
+For flights, report only fares you can actually verify from current web results; otherwise N/A.
+At the end list only 2-5 source names and a freshness timestamp.
 """
 
 
-def build_prompt(section: str) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+def now_label():
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    prompts = {
-        "dashboard": f"""
-Current local timestamp: {now}.
-Prepare ONE compact personal dashboard with this exact order:
 
-📌 داشبورد بازار و سفر
+def build_prompt(kind: str) -> str:
+    now = now_label()
+    if kind == "markets":
+        return f"""
+Current time: {now}.
+Find and return ONLY this compact dashboard, in this exact order:
 
-🥇 طلای جهانی
-- XAU/USD spot per troy ounce
-- 24h or latest session change if reliably available
+💰 بازار — {now}
+🥇 Gold spot: $X/oz | 24h: ±X%
+🇺🇸🇨🇦 USD/CAD: X | 24h: ±X%
+🇨🇦🇺🇸 CAD/USD: X
+🇺🇸🇮🇷 USD/IRR free market: X تومان | X ریال | 24h: ±X%
+🇨🇦🇮🇷 CAD/IRR free market: X تومان | X ریال
+🇮🇷🥇 طلای 18 عیار ایران: X تومان/گرم | 24h: ±X%
 
-🇺🇸🇨🇦 دلار آمریکا / کانادا
-- 1 USD = ? CAD
-- 1 CAD = ? USD
-- latest daily change if available
+📍 فقط اگر قابل اتکا بود: سکه امامی: X تومان
 
-🇺🇸🇮🇷 دلار آمریکا / ایران
-- free-market 1 USD = ? toman
-- also show rial equivalent
-- daily change if reliable
+Rules:
+- Use latest available values.
+- Cross-check Iran free-market FX/gold with at least two credible market sources when possible.
+- No economic commentary unless a move is unusually large; then add one short line beginning with ⚠️.
+- Keep under 14 lines total.
+"""
+    if kind == "flights":
+        return f"""
+Current time: {now}.
+Search current round-trip economy fares for one adult departing Montreal (YUL).
+Use flexible dates in the next 90 days, trip length roughly 7-21 nights.
+Return ONLY:
 
-🇨🇦🇮🇷 دلار کانادا / ایران
-- 1 CAD = ? toman and rial
-- use a direct reliable quote if available; otherwise derive from USD/IRR and USD/CAD and label «محاسبه‌ای»
+✈️ ارزان‌ترین بلیط‌های پیدا‌شده — {now}
+🇮🇷 YUL ↔ Tehran (IKA): C$X | outbound date → return date | airline | stops
+🇨🇦 YUL ↔ Vancouver (YVR): C$X | outbound date → return date | airline | nonstop/stops
 
-🥇🇮🇷 طلای ایران
-- 18K gold price per gram in toman and rial
-- international-gold linkage or daily change only if reliable
-- optionally one major coin price if reliable
-
-✈️ {HOME_AIRPORT} ↔ Iran
-- Find the cheapest CURRENTLY VISIBLE round-trip economy fare for 1 adult, flexible travel in the next 90 days, preferably Tehran IKA; allow other practical Iran airports only if clearly cheaper.
-- Search stays roughly 14-45 days.
-- Give CAD total, exact dates, airline(s), stops, and source.
-
-✈️ {HOME_AIRPORT} ↔ Vancouver YVR
-- Find the cheapest CURRENTLY VISIBLE round-trip economy fare for 1 adult in the next 60 days, flexible dates, stay roughly 3-7 days.
-- Give CAD total, exact dates, airline(s), stops, and source.
-
-🚨 فقط اگر مهم است
-- Maximum 3 items that materially affect the values above.
-
-Do not add unrelated macro sections. Keep the entire dashboard compact.
-""",
-
-        "markets": f"""
-Current timestamp: {now}.
-Return only a compact live market board:
-1) International gold XAU/USD spot + latest change.
-2) USD/CAD and inverse CAD/USD + latest change.
-3) USD/IRR free market in TOMAN first and RIAL second + latest reliable change.
-4) CAD/IRR in TOMAN and RIAL; direct quote if reliable, otherwise derived and explicitly marked «محاسبه‌ای».
-5) Iran 18K gold per gram in TOMAN and RIAL + latest reliable change.
-6) One short note: what moved most and why, only if evidence is clear.
-For every number, prefer current value and name the source. No generic news.
-""",
-
-        "iran": f"""
-Current timestamp: {now}.
-Return only a compact Iran asset board for an asset owner:
-- USD free-market rate: toman + rial, current value and daily move.
-- CAD/IRR: toman + rial; label derived values.
-- 18K gold per gram: toman + rial, current value and daily move.
-- Emami coin only if a current reliable quote exists.
-- Maximum 3 material Iran-specific alerts affecting FX/gold/asset values: sanctions, capital controls, monetary decisions, or severe geopolitical risk.
-Ignore routine political news and broad commentary.
-""",
-
-        "flight_iran": f"""
-Current timestamp: {now}.
-Search for the cheapest CURRENTLY VISIBLE round-trip ECONOMY airfare for 1 adult from {HOME_AIRPORT} (Montreal) to Iran within the next 90 days.
-Primary destination: Tehran IKA. You may include another practical Iranian international airport only if the visible total fare is clearly cheaper.
-Use flexible dates and target a stay of roughly 14-45 days.
-Return up to 3 best verified options ranked by total CAD price.
-For each show: total round-trip CAD price, outbound date, return date, exact airports, airline(s), number of stops each way, and source/platform.
-Do not quote a fare if the amount/dates are not actually visible in a current source. If no verifiable live fare is available, state «قیمت قابل تأیید پیدا نشد» and do not estimate.
-Keep it concise.
-""",
-
-        "flight_vancouver": f"""
-Current timestamp: {now}.
-Search for the cheapest CURRENTLY VISIBLE round-trip ECONOMY airfare for 1 adult from {HOME_AIRPORT} (Montreal) to Vancouver YVR within the next 60 days.
-Use flexible dates and target a stay of roughly 3-7 days.
-Return up to 3 best verified options ranked by total CAD price.
-For each show: total round-trip CAD price, outbound date, return date, airline(s), nonstop or stops, and source/platform.
-Do not quote a fare if the amount/dates are not actually visible in a current source. If no verifiable live fare is available, state «قیمت قابل تأیید پیدا نشد» and do not estimate.
-Keep it concise.
-""",
-
-        "alerts": f"""
-Current timestamp: {now}.
-Return a maximum of 5 alerts ONLY if they materially affect one of these tracked items:
-- international gold
-- USD/CAD
-- USD/IRR free market
-- CAD/IRR
-- Iran gold
-- airfare from {HOME_AIRPORT} to Iran
-- airfare from {HOME_AIRPORT} to Vancouver
-Include only unusual moves, major policy/geopolitical changes, or unusually attractive travel-price opportunities. Ignore routine news. If nothing material exists, say «هشدار مهمی در حال حاضر دیده نشد.»
-""",
-    }
-    return prompts[section]
+If Tehran is not the cheapest practical Iran gateway, you may add one extra line for another major Iran airport only when meaningfully cheaper.
+Do not give estimated fares. If a fare is not currently verifiable, put N/A.
+Keep under 8 lines total.
+"""
+    if kind == "alerts":
+        return f"""
+Current time: {now}.
+Give ONLY high-signal alerts affecting these items: global gold, USD/CAD, Iran free-market USD/IRR, Iran gold, Montreal-Iran airfare, Montreal-Vancouver airfare.
+Maximum 4 alerts. Ignore routine news.
+Each alert must be one short line and explain the practical implication.
+If nothing material changed, write: ✅ فعلاً هشدار مهمی نیست.
+"""
+    raise ValueError(kind)
 
 
 def http_json(url: str, method: str = "GET", payload=None, headers=None, timeout: int = 30):
     data = None
-    request_headers = {"User-Agent": "Metra-CEO-Bot/5.0"}
+    request_headers = {"User-Agent": "Metra-CEO-Bot/6.0"}
     if headers:
         request_headers.update(headers)
     if payload is not None:
@@ -211,63 +124,29 @@ def extract_output_text(response: dict) -> str:
                     pieces.append(text.strip())
     if pieces:
         return "\n".join(pieces)
-
     top = response.get("output_text")
-    if isinstance(top, str) and top.strip():
-        return top.strip()
-
-    def walk(obj):
-        found = []
-        if isinstance(obj, dict):
-            if obj.get("type") == "output_text" and isinstance(obj.get("text"), str):
-                found.append(obj["text"])
-            for value in obj.values():
-                found.extend(walk(value))
-        elif isinstance(obj, list):
-            for value in obj:
-                found.extend(walk(value))
-        return found
-
-    nested = [x.strip() for x in walk(response) if isinstance(x, str) and x.strip()]
-    return "\n".join(dict.fromkeys(nested))
+    return top.strip() if isinstance(top, str) else ""
 
 
-def call_openai(section: str, max_tokens: int) -> dict:
+def call_openai(kind: str) -> str:
     payload = {
         "model": MODEL,
         "tools": [{"type": "web_search"}],
         "reasoning": {"effort": "low"},
-        "max_output_tokens": max_tokens,
+        "max_output_tokens": 1600,
         "instructions": SYSTEM_PROMPT,
-        "input": build_prompt(section),
+        "input": build_prompt(kind),
     }
-    return http_json(
+    response = http_json(
         "https://api.openai.com/v1/responses",
         method="POST",
         payload=payload,
         headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-        timeout=110,
+        timeout=100,
     )
-
-
-def generate_report(section: str) -> str:
-    print(f"[{VERSION}] web job start: {section}", flush=True)
-    token_budget = 2600 if section == "dashboard" else 1800
-    response = call_openai(section, token_budget)
     text = extract_output_text(response)
-
     if not text:
-        print(
-            f"[{VERSION}] empty output: section={section} status={response.get('status')} details={response.get('incomplete_details')}",
-            flush=True,
-        )
-        response = call_openai(section, token_budget + 1600)
-        text = extract_output_text(response)
-
-    if not text:
-        raise RuntimeError("OpenAI returned no visible text after retry")
-
-    print(f"[{VERSION}] web job done: {section} chars={len(text)}", flush=True)
+        raise RuntimeError("empty OpenAI response")
     return text
 
 
@@ -291,65 +170,77 @@ def get_updates(offset=None):
     return http_json(f"{TELEGRAM_API}/getUpdates?{urllib.parse.urlencode(params)}", timeout=35)
 
 
-def cache_read(section: str):
+def ttl_for(kind: str) -> int:
+    return {"markets": MARKETS_TTL, "flights": FLIGHTS_TTL, "alerts": ALERTS_TTL}[kind]
+
+
+def cache_get(kind: str):
     with LOCK:
-        item = CACHE.get(section)
-        if not item:
-            return None, False
-        return item, time.time() - item["time"] <= CACHE_TTL[section]
+        item = CACHE.get(kind)
+    if not item:
+        return None, False
+    return item, (time.time() - item["time"] <= ttl_for(kind))
 
 
-def cache_write(section: str, text: str):
+def cache_put(kind: str, text: str):
     with LOCK:
-        CACHE[section] = {"text": text, "time": time.time()}
+        CACHE[kind] = {"text": text, "time": time.time()}
 
 
-def time_label(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%H:%M")
-
-
-def background_job(section: str, chat_id, notify: bool):
+def refresh_job(kind: str, notify_chat=None):
     try:
-        text = generate_report(section)
-        cache_write(section, text)
-        if notify and chat_id:
-            send_telegram(f"✅ بروزرسانی {time_label(time.time())}\n\n{text}", chat_id, menu=True)
+        print(f"[{VERSION}] refresh start {kind}", flush=True)
+        text = call_openai(kind)
+        cache_put(kind, text)
+        print(f"[{VERSION}] refresh done {kind}", flush=True)
+        if notify_chat:
+            send_telegram(text, notify_chat, menu=True)
     except Exception as exc:
-        print(f"[{VERSION}] job error {section}: {type(exc).__name__}: {exc}", flush=True)
-        if notify and chat_id:
-            send_telegram("⚠️ بروزرسانی این بخش کامل نشد. چند دقیقه دیگر دوباره امتحان کن.", chat_id, menu=True)
+        print(f"[{VERSION}] refresh error {kind}: {type(exc).__name__}: {exc}", flush=True)
+        if notify_chat:
+            send_telegram("⚠️ بروزرسانی کامل نشد؛ آخرین داده ذخیره‌شده همچنان قابل استفاده است.", notify_chat, menu=True)
     finally:
         with LOCK:
-            RUNNING.discard(section)
+            RUNNING.discard(kind)
 
 
-def start_job(section: str, chat_id=None, notify: bool = False) -> bool:
+def start_refresh(kind: str, notify_chat=None) -> bool:
     with LOCK:
-        if section in RUNNING:
+        if kind in RUNNING:
             return False
-        RUNNING.add(section)
-    EXECUTOR.submit(background_job, section, chat_id, notify)
+        RUNNING.add(kind)
+    EXECUTOR.submit(refresh_job, kind, notify_chat)
     return True
 
 
-def serve(section: str, chat_id: str):
-    LAST_SECTION[chat_id] = section
-    item, fresh = cache_read(section)
-    if item and fresh:
-        send_telegram(f"⚡ بروزرسانی {time_label(item['time'])}\n\n{item['text']}", chat_id, menu=True)
-        return
+def render_cached(kind: str, chat_id: str):
+    item, fresh = cache_get(kind)
     if item:
-        send_telegram(
-            f"⚡ آخرین نسخه موجود ({time_label(item['time'])})\nنسخه تازه هم‌زمان در پس‌زمینه در حال آماده‌شدن است.\n\n{item['text']}",
-            chat_id,
-            menu=True,
-        )
-        start_job(section, chat_id, notify=True)
+        age = int((time.time() - item["time"]) / 60)
+        suffix = "" if fresh else f"\n\n⏱ داده {age} دقیقه قبل است؛ بروزرسانی در پس‌زمینه شروع شد."
+        send_telegram(item["text"] + suffix, chat_id, menu=True)
+        if not fresh:
+            start_refresh(kind)
         return
-    if start_job(section, chat_id, notify=True):
-        send_telegram("⚡ درخواست ثبت شد؛ نتیجه پس از آماده‌شدن خودکار می‌آید و منو آزاد است.", chat_id, menu=True)
-    else:
-        send_telegram("⏳ همین بخش الان در حال بروزرسانی است.", chat_id, menu=True)
+    start_refresh(kind, notify_chat=chat_id)
+    send_telegram("⏳ اولین داده در حال آماده‌شدن است. نتیجه خودکار ارسال می‌شود؛ منو همچنان آزاد است.", chat_id, menu=True)
+
+
+def render_dashboard(chat_id: str):
+    m, _ = cache_get("markets")
+    f, _ = cache_get("flights")
+    a, _ = cache_get("alerts")
+    if not any([m, f, a]):
+        for kind in ("markets", "flights", "alerts"):
+            start_refresh(kind)
+        send_telegram("⏳ داشبورد اولیه در حال آماده‌شدن است. چند لحظه بعد دوباره «📌 داشبورد فوری» را بزن.", chat_id, menu=True)
+        return
+    parts = [x["text"] for x in (m, f, a) if x]
+    send_telegram("\n\n".join(parts), chat_id, menu=True)
+    for kind in ("markets", "flights", "alerts"):
+        item, fresh = cache_get(kind)
+        if not item or not fresh:
+            start_refresh(kind)
 
 
 def handle_message(message: dict):
@@ -365,35 +256,37 @@ def handle_message(message: dict):
 
     if low in {"/start", "/help", "hello", "hi"}:
         send_telegram(
-            "⚡ داشبورد شخصی بازار و سفر آماده است.\n\nفقط قیمت‌ها، دارایی‌های ایران، بلیت‌های ارزان و هشدارهای مهم نمایش داده می‌شوند.",
+            "⚡ داشبورد شخصی بازار و سفر\n\nفقط قیمت‌ها، بلیت‌ها و هشدارهای مهم. گزارش طولانی حذف شده است.",
             chat_id,
             menu=True,
         )
-        return
-
-    if raw == "🔄 بروزرسانی زنده":
-        section = LAST_SECTION.get(chat_id)
-        if not section:
-            send_telegram("اول یکی از بخش‌ها را انتخاب کن.", chat_id, menu=True)
-        elif start_job(section, chat_id, notify=True):
-            send_telegram("🔄 بروزرسانی زنده شروع شد. منو همچنان آزاد است.", chat_id, menu=True)
-        else:
-            send_telegram("⏳ همین بخش الان در حال بروزرسانی است.", chat_id, menu=True)
-        return
-
-    commands = {
-        "/dashboard": "dashboard",
-        "/markets": "markets",
-        "/iran": "iran",
-        "/iranflight": "flight_iran",
-        "/vancouver": "flight_vancouver",
-        "/alerts": "alerts",
-    }
-    section = BUTTON_TO_SECTION.get(raw) or commands.get(low)
-    if section:
-        serve(section, chat_id)
+    elif raw == "📌 داشبورد فوری" or low == "/dashboard":
+        render_dashboard(chat_id)
+    elif raw == "💰 ارز و طلا" or low == "/markets":
+        render_cached("markets", chat_id)
+    elif raw == "✈️ بلیط‌ها" or low == "/flights":
+        render_cached("flights", chat_id)
+    elif raw == "🚨 فقط هشدارها" or low == "/alerts":
+        render_cached("alerts", chat_id)
+    elif raw == "🔄 بروزرسانی" or low == "/refresh":
+        started = 0
+        for kind in ("markets", "flights", "alerts"):
+            started += 1 if start_refresh(kind) else 0
+        send_telegram(f"🔄 بروزرسانی در پس‌زمینه شروع شد ({started} بخش). منو قفل نمی‌شود.", chat_id, menu=True)
     else:
         send_telegram("یکی از دکمه‌های منو را انتخاب کن.", chat_id, menu=True)
+
+
+def scheduler_loop():
+    while True:
+        try:
+            for kind in ("markets", "flights", "alerts"):
+                item, fresh = cache_get(kind)
+                if not item or not fresh:
+                    start_refresh(kind)
+        except Exception as exc:
+            print(f"[{VERSION}] scheduler error: {exc}", flush=True)
+        time.sleep(60)
 
 
 def polling_loop():
@@ -414,17 +307,13 @@ def polling_loop():
 
 def startup():
     print(f"[{VERSION}] START", flush=True)
+    threading.Thread(target=scheduler_loop, daemon=True).start()
+    for kind in ("markets", "flights", "alerts"):
+        start_refresh(kind)
     try:
-        send_telegram(
-            "✅ Metra Market & Travel Intelligence V5 فعال شد.\nداشبورد پالایش‌شده آماده است.",
-            TELEGRAM_CHAT_ID,
-            menu=True,
-        )
+        send_telegram("✅ نسخه V6 فعال شد — داشبورد سریع و پالایش‌شده آماده است.", TELEGRAM_CHAT_ID, menu=True)
     except Exception as exc:
         print(f"[{VERSION}] startup telegram error: {type(exc).__name__}: {exc}", flush=True)
-
-    # Warm the highest-value market dashboard only; flight searches run on demand.
-    start_job("markets", notify=False)
     polling_loop()
 
 
