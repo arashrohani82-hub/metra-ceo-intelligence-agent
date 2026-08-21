@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-VERSION = "CEO-BOT-V8-VERIFIED"
+VERSION = "CEO-BOT-V9-TRUSTED-PRACTICAL"
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
@@ -32,7 +32,7 @@ TTL = 30 * 60
 
 MAIN_KEYBOARD = {
     "keyboard": [
-        [{"text": "📊 داشبورد تأییدشده"}],
+        [{"text": "📊 داشبورد"}],
         [{"text": "💰 ارز و طلا"}, {"text": "✈️ بلیط‌ها"}],
         [{"text": "🚨 هشدارها"}, {"text": "🔄 بررسی مجدد"}],
     ],
@@ -41,13 +41,18 @@ MAIN_KEYBOARD = {
     "input_field_placeholder": "یک گزینه را انتخاب کن",
 }
 
-BASE_INSTRUCTIONS = """
-You are a verification-grade data collector. Output ONLY valid JSON, no markdown.
-Accuracy is more important than completeness. Never guess or infer a market price from a headline.
-For every numeric item, use a current page that visibly contains that number. Return null when uncertain.
-Iran FX must be FREE-MARKET TOMAN, not official/central-bank rate, and must have a visible source.
-Flights must be CURRENT round-trip economy fares for one adult from Montreal YUL with visible total price and exact dates.
-Never call a one-way fare, monthly teaser, 'from' price without dates, or stale snippet a verified round-trip fare.
+SYSTEM_PROMPT = """
+You are a high-accuracy market and travel data collector. Return ONLY valid JSON.
+Do not write prose or markdown.
+Accuracy matters more than completeness, but do NOT discard a good primary-source value merely because a second source is unavailable.
+For each metric:
+- choose one clearly current PRIMARY value from a reputable source;
+- optionally provide one SECONDARY value for cross-checking;
+- include source names and whether the value was directly visible.
+Never guess numbers.
+Iran FX must be FREE-MARKET TOMAN, not official rate.
+Flights must be current round-trip economy fares for one adult from Montreal YUL, with total CAD price and exact outbound/return dates for the same itinerary.
+Reject teaser/from prices without matching dates, monthly estimates, and one-way fares.
 """
 
 
@@ -68,13 +73,13 @@ def parse_json_text(text: str) -> dict:
         raise
 
 
-def openai_json(prompt: str, max_tokens=2200) -> dict:
+def openai_json(prompt: str, max_tokens=2400) -> dict:
     payload = {
         "model": MODEL,
         "tools": [{"type": "web_search"}],
         "reasoning": {"effort": "low"},
         "max_output_tokens": max_tokens,
-        "instructions": BASE_INSTRUCTIONS,
+        "instructions": SYSTEM_PROMPT,
         "input": prompt,
     }
     r = requests.post(
@@ -97,184 +102,191 @@ def openai_json(prompt: str, max_tokens=2200) -> dict:
     return parse_json_text(text)
 
 
-def market_prompt(role: str) -> str:
+def market_prompt() -> str:
     return f"""
-Role: {role}. Time: {datetime.now().isoformat(timespec='minutes')}.
-Collect these values independently. Prefer primary/major sources; for Iran use reputable free-market sources such as TGJU/Bonbast/DolarChand only when the displayed unit is unambiguous.
-Return exactly:
+Time now: {datetime.now().isoformat(timespec='minutes')}.
+Collect CURRENT market data and return exactly this JSON shape:
 {{
- "gold_usd_oz": number|null,
- "gold_change_pct": number|null,
- "usd_cad": number|null,
- "usd_cad_change_pct": number|null,
- "usd_irr_toman": number|null,
- "usd_irr_change_pct": number|null,
- "iran_gold18_toman_g": number|null,
- "iran_gold18_change_pct": number|null,
- "emami_coin_toman": number|null,
- "emami_coin_change_pct": number|null,
- "sources": {{
-   "gold": string|null,
-   "usd_cad": string|null,
-   "usd_irr": string|null,
-   "iran_gold18": string|null,
-   "emami_coin": string|null
- }}
+  "gold": {{"primary": number|null, "secondary": number|null, "change_pct": number|null, "primary_source": string|null, "secondary_source": string|null}},
+  "usd_cad": {{"primary": number|null, "secondary": number|null, "change_pct": number|null, "primary_source": string|null, "secondary_source": string|null}},
+  "usd_irr_toman": {{"primary": number|null, "secondary": number|null, "change_pct": number|null, "primary_source": string|null, "secondary_source": string|null}},
+  "iran_gold18_toman_g": {{"primary": number|null, "secondary": number|null, "change_pct": number|null, "primary_source": string|null, "secondary_source": string|null}},
+  "emami_coin_toman": {{"primary": number|null, "secondary": number|null, "change_pct": number|null, "primary_source": string|null, "secondary_source": string|null}}
 }}
-Do not convert rial to toman unless the source unit is explicit. Do not use search snippets whose date/currentness is unclear.
+Rules:
+- gold = XAU/USD spot per troy ounce.
+- USD/CAD = 1 USD in CAD.
+- USD/IRR = current FREE-MARKET TOMAN value for 1 USD.
+- Iran 18K gold = TOMAN per gram.
+- Emami coin = TOMAN.
+- Prefer clearly current pages. For Canada FX prefer Bank of Canada or established market providers. For Iran use reputable free-market sources such as TGJU, Bonbast, DolarChand when unit/date are explicit.
+- If only one source is solid, set secondary to null rather than dropping the primary.
 """
 
 
-def flight_prompt(route: str, role: str) -> str:
+def flight_prompt(route: str) -> str:
     if route == "iran":
         dest = "Tehran IKA"
-        horizon = "next 90 days, stay 7-30 nights"
+        horizon = "within the next 90 days, stay 7-30 nights"
     else:
         dest = "Vancouver YVR"
-        horizon = "next 60 days, stay 3-7 nights"
+        horizon = "within the next 60 days, stay 3-7 nights"
     return f"""
-Role: {role}. Time: {datetime.now().isoformat(timespec='minutes')}.
-Find one currently visible CHEAPEST round-trip economy itinerary for 1 adult from Montreal YUL to {dest}, {horizon}.
+Time now: {datetime.now().isoformat(timespec='minutes')}.
+Find the cheapest CURRENTLY VISIBLE round-trip economy itinerary for 1 adult from Montreal YUL to {dest}, {horizon}.
 Return exactly:
-{{"price_cad": number|null, "outbound": "YYYY-MM-DD"|null, "return": "YYYY-MM-DD"|null, "airline": string|null, "stops": string|null, "source_url": string|null, "source_name": string|null}}
-The total CAD price and both dates must be visible for the same itinerary. Reject teaser/from prices and one-way prices. If not verifiable, return null fields.
+{{
+  "primary": {{"price_cad": number|null, "outbound": "YYYY-MM-DD"|null, "return": "YYYY-MM-DD"|null, "airline": string|null, "stops": string|null, "source_url": string|null, "source_name": string|null}},
+  "secondary": {{"price_cad": number|null, "outbound": "YYYY-MM-DD"|null, "return": "YYYY-MM-DD"|null, "source_name": string|null}}
+}}
+Only accept a primary fare when total CAD price and both dates are visible for the same itinerary. If no solid fare exists, use nulls.
 """
 
 
-def as_float(v):
+def f(v):
     try:
-        if v is None:
-            return None
-        return float(v)
+        return float(v) if v is not None else None
     except Exception:
         return None
 
 
-def agree(a, b, rel_tol):
-    a, b = as_float(a), as_float(b)
+def within(a, b, tol):
+    a, b = f(a), f(b)
     if a is None or b is None or a <= 0 or b <= 0:
-        return None
-    if abs(a - b) / ((a + b) / 2.0) > rel_tol:
-        return None
-    return (a + b) / 2.0
+        return False
+    return abs(a - b) / ((a + b) / 2) <= tol
 
 
-def pct_agree(a, b, abs_tol=0.35):
-    a, b = as_float(a), as_float(b)
-    if a is None or b is None:
-        return None
-    return (a + b) / 2.0 if abs(a - b) <= abs_tol else None
-
-
-def guard_jump(name, new_value, old_value):
-    if new_value is None or old_value is None:
-        return new_value
-    limits = {
-        "gold_usd_oz": 0.03,
-        "usd_cad": 0.015,
-        "usd_irr_toman": 0.05,
-        "iran_gold18_toman_g": 0.06,
-        "emami_coin_toman": 0.06,
+def sane(name, value):
+    value = f(value)
+    if value is None:
+        return False
+    ranges = {
+        "gold_usd_oz": (1000, 10000),
+        "usd_cad": (1.0, 2.0),
+        "usd_irr_toman": (20000, 1000000),
+        "iran_gold18_toman_g": (1000000, 100000000),
+        "emami_coin_toman": (10000000, 1000000000),
     }
-    lim = limits.get(name)
-    if not lim:
-        return new_value
-    try:
-        if abs(float(new_value) - float(old_value)) / float(old_value) > lim:
-            return old_value
-    except Exception:
-        pass
-    return new_value
+    lo, hi = ranges[name]
+    return lo <= value <= hi
 
 
-def reconcile_markets(a: dict, b: dict, old: dict | None) -> dict:
+def choose_metric(name, item, old, tolerance):
+    p = f((item or {}).get("primary"))
+    s = f((item or {}).get("secondary"))
+    oldv = f((old or {}).get(name))
+    status = "primary"
+
+    if not sane(name, p):
+        return (oldv if oldv is not None else None), "old" if oldv is not None else "missing"
+
+    if s is not None and sane(name, s):
+        if within(p, s, tolerance):
+            p = (p + s) / 2
+            status = "verified"
+        else:
+            status = "warning"
+
+    jump_limits = {
+        "gold_usd_oz": 0.04,
+        "usd_cad": 0.02,
+        "usd_irr_toman": 0.08,
+        "iran_gold18_toman_g": 0.08,
+        "emami_coin_toman": 0.10,
+    }
+    if oldv and abs(p - oldv) / oldv > jump_limits[name]:
+        return oldv, "old-warning"
+
+    return p, status
+
+
+def build_market_snapshot(old=None):
+    raw = openai_json(market_prompt(), 2500)
     out = {}
-    out["gold_usd_oz"] = agree(a.get("gold_usd_oz"), b.get("gold_usd_oz"), 0.01)
-    out["gold_change_pct"] = pct_agree(a.get("gold_change_pct"), b.get("gold_change_pct"), 0.5)
-    out["usd_cad"] = agree(a.get("usd_cad"), b.get("usd_cad"), 0.004)
-    out["usd_cad_change_pct"] = pct_agree(a.get("usd_cad_change_pct"), b.get("usd_cad_change_pct"), 0.25)
-    out["usd_irr_toman"] = agree(a.get("usd_irr_toman"), b.get("usd_irr_toman"), 0.02)
-    out["usd_irr_change_pct"] = pct_agree(a.get("usd_irr_change_pct"), b.get("usd_irr_change_pct"), 0.6)
-    out["iran_gold18_toman_g"] = agree(a.get("iran_gold18_toman_g"), b.get("iran_gold18_toman_g"), 0.02)
-    out["iran_gold18_change_pct"] = pct_agree(a.get("iran_gold18_change_pct"), b.get("iran_gold18_change_pct"), 0.6)
-    out["emami_coin_toman"] = agree(a.get("emami_coin_toman"), b.get("emami_coin_toman"), 0.025)
-    out["emami_coin_change_pct"] = pct_agree(a.get("emami_coin_change_pct"), b.get("emami_coin_change_pct"), 0.8)
-
-    old = old or {}
-    for k in ["gold_usd_oz", "usd_cad", "usd_irr_toman", "iran_gold18_toman_g", "emami_coin_toman"]:
-        out[k] = guard_jump(k, out.get(k), old.get(k))
+    statuses = {}
+    specs = [
+        ("gold_usd_oz", "gold", 0.012),
+        ("usd_cad", "usd_cad", 0.006),
+        ("usd_irr_toman", "usd_irr_toman", 0.035),
+        ("iran_gold18_toman_g", "iran_gold18_toman_g", 0.035),
+        ("emami_coin_toman", "emami_coin_toman", 0.04),
+    ]
+    for key, rawkey, tol in specs:
+        out[key], statuses[key] = choose_metric(key, raw.get(rawkey) or {}, old or {}, tol)
+        out[key.replace("_usd_oz", "_change_pct") if key == "gold_usd_oz" else key.replace("_toman_g", "_change_pct") if key == "iran_gold18_toman_g" else key.replace("_toman", "_change_pct") if key in ("usd_irr_toman", "emami_coin_toman") else "usd_cad_change_pct"] = f((raw.get(rawkey) or {}).get("change_pct"))
 
     if out.get("usd_cad"):
-        out["cad_usd"] = 1.0 / out["usd_cad"]
+        out["cad_usd"] = 1 / out["usd_cad"]
     else:
-        out["cad_usd"] = None
+        out["cad_usd"] = f((old or {}).get("cad_usd"))
+
     if out.get("usd_irr_toman") and out.get("usd_cad"):
         out["cad_irr_toman"] = out["usd_irr_toman"] / out["usd_cad"]
     else:
-        out["cad_irr_toman"] = None
+        out["cad_irr_toman"] = f((old or {}).get("cad_irr_toman"))
     out["cad_irr_change_pct"] = None
 
-    g, fx, g18 = out.get("gold_usd_oz"), out.get("usd_irr_toman"), out.get("iran_gold18_toman_g")
-    if g and fx and g18:
-        theoretical = (g / 31.1034768) * 0.75 * fx
-        ratio = g18 / theoretical if theoretical else 0
-        if ratio < 0.75 or ratio > 1.35:
-            out["iran_gold18_toman_g"] = old.get("iran_gold18_toman_g")
-            out["iran_gold18_change_pct"] = None
-
-    srcs = []
-    for obj in (a.get("sources") or {}, b.get("sources") or {}):
-        for v in obj.values():
-            if v and v not in srcs:
-                srcs.append(v)
-    out["sources"] = srcs[:8]
+    out["status"] = statuses
+    sources = []
+    for rawkey in ("gold", "usd_cad", "usd_irr_toman", "iran_gold18_toman_g", "emami_coin_toman"):
+        obj = raw.get(rawkey) or {}
+        for k in ("primary_source", "secondary_source"):
+            v = obj.get(k)
+            if v and v not in sources:
+                sources.append(v)
+    out["sources"] = sources[:8]
     return out
 
 
-def verify_flight(route: str) -> dict:
-    p = openai_json(flight_prompt(route, "primary search"), 1500)
-    v = openai_json(flight_prompt(route, "independent verification search; try a different source/provider"), 1500)
-    required = ["price_cad", "outbound", "return", "source_url"]
-    if any(not p.get(k) for k in required) or any(not v.get(k) for k in required):
-        return {}
-    if p.get("outbound") != v.get("outbound") or p.get("return") != v.get("return"):
-        return {}
-    price = agree(p.get("price_cad"), v.get("price_cad"), 0.10)
-    if price is None:
-        return {}
+def choose_flight(raw, old_flight=None):
+    p = raw.get("primary") or {}
+    s = raw.get("secondary") or {}
+    required = [p.get("price_cad"), p.get("outbound"), p.get("return"), p.get("source_url")]
+    if not all(required):
+        return old_flight or {}, "old" if old_flight else "missing"
+    price = f(p.get("price_cad"))
+    if price is None or price < 50 or price > 10000:
+        return old_flight or {}, "old" if old_flight else "missing"
+
+    status = "primary"
+    sp = f(s.get("price_cad"))
+    if sp and s.get("outbound") == p.get("outbound") and s.get("return") == p.get("return"):
+        if within(price, sp, 0.12):
+            price = (price + sp) / 2
+            status = "verified"
+        else:
+            status = "warning"
+
     return {
         "price_cad": round(price),
         "outbound": p.get("outbound"),
         "return": p.get("return"),
-        "airline": p.get("airline") or v.get("airline"),
-        "stops": p.get("stops") or v.get("stops"),
+        "airline": p.get("airline") or "N/A",
+        "stops": p.get("stops") or "N/A",
         "source_url": p.get("source_url"),
-        "source_name": p.get("source_name") or v.get("source_name"),
-    }
+        "source_name": p.get("source_name") or "",
+    }, status
 
 
-def build_verified_snapshot(old=None) -> dict:
-    a = openai_json(market_prompt("primary market collector"), 2200)
-    b = openai_json(market_prompt("independent verifier; use different sources where possible"), 2200)
-    market = reconcile_markets(a, b, old)
-    market["iran_flight"] = verify_flight("iran")
-    market["vancouver_flight"] = verify_flight("vancouver")
-    alerts = []
-    if old:
-        for key, label, threshold in [
-            ("gold_usd_oz", "طلای جهانی", 0.02),
-            ("usd_cad", "USD/CAD", 0.01),
-            ("usd_irr_toman", "دلار آزاد ایران", 0.03),
-            ("iran_gold18_toman_g", "طلای ۱۸ عیار", 0.03),
-        ]:
-            n, o = market.get(key), old.get(key)
-            if n and o:
-                move = (n - o) / o
-                if abs(move) >= threshold:
-                    alerts.append(f"{label}: {move:+.1%}")
-    market["alerts"] = alerts[:2]
-    market["verified_at"] = now_label()
-    return market
+def build_snapshot(old=None):
+    out = build_market_snapshot(old)
+    iran_raw = openai_json(flight_prompt("iran"), 1600)
+    van_raw = openai_json(flight_prompt("vancouver"), 1600)
+    out["iran_flight"], out["iran_flight_status"] = choose_flight(iran_raw, (old or {}).get("iran_flight"))
+    out["vancouver_flight"], out["vancouver_flight_status"] = choose_flight(van_raw, (old or {}).get("vancouver_flight"))
+
+    warnings = []
+    for k, st in (out.get("status") or {}).items():
+        if "warning" in st:
+            warnings.append(k)
+    if "warning" in out.get("iran_flight_status", ""):
+        warnings.append("iran_flight")
+    if "warning" in out.get("vancouver_flight_status", ""):
+        warnings.append("vancouver_flight")
+    out["warnings"] = warnings
+    out["verified_at"] = now_label()
+    return out
 
 
 def telegram_send_message(text: str, chat_id=TELEGRAM_CHAT_ID, menu=True):
@@ -308,8 +320,6 @@ def font(size, bold=False):
 
 
 def rtl(text):
-    if text is None:
-        return ""
     try:
         return get_display(arabic_reshaper.reshape(str(text)))
     except Exception:
@@ -340,45 +350,56 @@ def fmt_pct(value):
 def color_for_change(value):
     try:
         v = float(value)
-        if v > 0: return (34, 214, 110)
-        if v < 0: return (255, 72, 72)
+        if v > 0:
+            return (34, 214, 110)
+        if v < 0:
+            return (255, 72, 72)
     except Exception:
         pass
     return (160, 170, 180)
 
 
-def rounded(draw, box, radius=24, fill=(12, 22, 31), outline=(45, 65, 78), width=2):
+def rounded(draw, box, radius=22, fill=(10, 19, 27), outline=(45, 65, 78), width=2):
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline, width=width)
 
 
-def center_text(draw, box, text, fnt, fill):
-    x1, y1, x2, y2 = box
-    b = draw.textbbox((0, 0), text, font=fnt)
-    w, h = b[2] - b[0], b[3] - b[1]
-    draw.text(((x1 + x2 - w) / 2, (y1 + y2 - h) / 2), text, font=fnt, fill=fill)
-
-
-def card_metric(draw, box, title, value, subtitle="", change=None, accent=(46, 204, 113)):
+def card_metric(draw, box, title, value, subtitle="", change=None, accent=(46, 204, 113), badge=""):
     rounded(draw, box, fill=(10, 19, 27), outline=accent, width=2)
     x1, y1, x2, y2 = box
-    draw.text((x1 + 22, y1 + 18), rtl(title), font=font(25, True), fill=(236, 241, 245))
-    draw.text((x1 + 22, y1 + 66), value, font=font(39, True), fill=(245, 248, 250))
+    draw.text((x1 + 18, y1 + 16), rtl(title), font=font(25, True), fill=(236, 241, 245))
+    draw.text((x1 + 18, y1 + 62), value, font=font(39, True), fill=(245, 248, 250))
     if subtitle:
-        draw.text((x1 + 22, y1 + 118), rtl(subtitle), font=font(20), fill=(165, 178, 190))
+        draw.text((x1 + 18, y1 + 112), rtl(subtitle), font=font(20), fill=(165, 178, 190))
     if change is not None:
-        draw.text((x1 + 22, y2 - 40), fmt_pct(change), font=font(20, True), fill=color_for_change(change))
+        draw.text((x1 + 18, y2 - 38), fmt_pct(change), font=font(20, True), fill=color_for_change(change))
+    if badge:
+        draw.text((x2 - 70, y1 + 16), badge, font=font(18, True), fill=(180, 190, 200))
 
 
-def flight_card(draw, box, title, flight, accent):
+def flight_card(draw, box, title, flight, accent, badge=""):
     rounded(draw, box, fill=(9, 20, 30), outline=accent, width=2)
     x1, y1, x2, y2 = box
-    draw.text((x1 + 22, y1 + 18), rtl(title), font=font(26, True), fill=(238, 243, 247))
+    draw.text((x1 + 20, y1 + 18), rtl(title), font=font(25, True), fill=(238, 243, 247))
     price = flight.get("price_cad") if isinstance(flight, dict) else None
-    draw.text((x1 + 22, y1 + 70), f"C${fmt_num(price)}" if price is not None else "—", font=font(44, True), fill=accent)
-    out, ret = (flight or {}).get("outbound") or "—", (flight or {}).get("return") or "—"
-    draw.text((x1 + 22, y1 + 132), f"{out}  →  {ret}", font=font(21), fill=(220, 226, 231))
-    airline, stops = (flight or {}).get("airline") or "—", (flight or {}).get("stops") or "—"
-    draw.text((x1 + 22, y1 + 171), f"{airline}  •  {stops}", font=font(19), fill=(164, 178, 190))
+    draw.text((x1 + 20, y1 + 66), f"C${fmt_num(price)}" if price is not None else "—", font=font(43, True), fill=accent)
+    out = (flight or {}).get("outbound") or "—"
+    ret = (flight or {}).get("return") or "—"
+    draw.text((x1 + 20, y1 + 126), f"{out}  →  {ret}", font=font(20), fill=(220, 226, 231))
+    airline = (flight or {}).get("airline") or "N/A"
+    stops = (flight or {}).get("stops") or "N/A"
+    draw.text((x1 + 20, y1 + 162), f"{airline}  •  {stops}", font=font(18), fill=(164, 178, 190))
+    if badge:
+        draw.text((x2 - 82, y1 + 18), badge, font=font(18, True), fill=(180, 190, 200))
+
+
+def badge_for(status):
+    if status == "verified":
+        return "✓"
+    if status in ("warning", "old-warning"):
+        return "!"
+    if status == "old":
+        return "↺"
+    return "•"
 
 
 def render_dashboard(snapshot: dict) -> bytes:
@@ -386,58 +407,54 @@ def render_dashboard(snapshot: dict) -> bytes:
     img = Image.new("RGB", (W, H), (4, 10, 16))
     d = ImageDraw.Draw(img)
     d.text((48, 34), "METRA", font=font(44, True), fill=(242, 245, 247))
-    d.text((48, 82), "VERIFIED DASHBOARD", font=font(22, True), fill=(46, 204, 113))
-    d.text((515, 48), snapshot.get("verified_at") or now_label(), font=font(22), fill=(190, 201, 210))
-    rounded(d, (855, 34, 1035, 88), radius=18, fill=(8, 42, 28), outline=(46, 204, 113), width=2)
-    center_text(d, (855, 34, 1035, 88), "✓ VERIFIED", font(20, True), (46, 204, 113))
-    card_metric(d, (40,145,360,420), "طلای جهانی", f"${fmt_num(snapshot.get('gold_usd_oz'))}", "هر اونس", snapshot.get("gold_change_pct"), (232,170,32))
-    card_metric(d, (380,145,700,420), "USD / CAD", fmt_num(snapshot.get("usd_cad"),4), "", snapshot.get("usd_cad_change_pct"), (34,214,110))
-    card_metric(d, (720,145,1040,420), "CAD / USD", fmt_num(snapshot.get("cad_usd"),4), "", None, (54,130,220))
-    card_metric(d, (40,445,280,700), "USD / IRR", fmt_num(snapshot.get("usd_irr_toman")), "تومان", snapshot.get("usd_irr_change_pct"), (54,130,220))
-    card_metric(d, (300,445,540,700), "CAD / IRR", fmt_num(snapshot.get("cad_irr_toman")), "تومان • محاسبه‌ای", None, (54,130,220))
-    card_metric(d, (560,445,800,700), "طلای 18 عیار", fmt_num(snapshot.get("iran_gold18_toman_g")), "تومان / گرم", snapshot.get("iran_gold18_change_pct"), (34,214,110))
-    card_metric(d, (820,445,1040,700), "سکه امامی", fmt_num(snapshot.get("emami_coin_toman")), "تومان", snapshot.get("emami_coin_change_pct"), (34,214,110))
-    d.text((46,740), rtl("ارزان‌ترین بلیت تأییدشده"), font=font(30, True), fill=(242,245,247))
-    flight_card(d, (40,800,520,1085), "مونترال ⇄ تهران", snapshot.get("iran_flight") or {}, (56,139,253))
-    flight_card(d, (560,800,1040,1085), "مونترال ⇄ ونکوور", snapshot.get("vancouver_flight") or {}, (34,214,110))
-    rounded(d, (40,1120,1040,1310), fill=(8,18,25), outline=(44,60,72), width=2)
-    d.text((64,1143), rtl("هشدارهای مهم"), font=font(28, True), fill=(242,245,247))
-    alerts = snapshot.get("alerts") or []
-    if not alerts:
-        d.text((64,1202), rtl("مورد مهمی وجود ندارد."), font=font(24), fill=(34,214,110))
+    d.text((48, 82), "TRUSTED DASHBOARD", font=font(22, True), fill=(46, 204, 113))
+    d.text((505, 48), snapshot.get("verified_at") or now_label(), font=font(22), fill=(190, 201, 210))
+    rounded(d, (860, 34, 1035, 88), radius=18, fill=(8, 42, 28), outline=(46, 204, 113), width=2)
+    label = "✓ CHECKED" if not snapshot.get("warnings") else "⚠ CHECKED"
+    d.text((886, 49), label, font=font(20, True), fill=(46, 204, 113) if not snapshot.get("warnings") else (255, 190, 60))
+
+    st = snapshot.get("status") or {}
+    card_metric(d, (40, 145, 360, 420), "طلای جهانی", f"${fmt_num(snapshot.get('gold_usd_oz'))}", "هر اونس", snapshot.get("gold_change_pct"), (232, 170, 32), badge_for(st.get("gold_usd_oz")))
+    card_metric(d, (380, 145, 700, 420), "USD / CAD", fmt_num(snapshot.get("usd_cad"), 4), "", snapshot.get("usd_cad_change_pct"), (34, 214, 110), badge_for(st.get("usd_cad")))
+    card_metric(d, (720, 145, 1040, 420), "CAD / USD", fmt_num(snapshot.get("cad_usd"), 4), "محاسبه‌ای", None, (54, 130, 220), "=")
+
+    card_metric(d, (40, 445, 280, 700), "USD / IRR", fmt_num(snapshot.get("usd_irr_toman")), "تومان", snapshot.get("usd_irr_change_pct"), (54, 130, 220), badge_for(st.get("usd_irr_toman")))
+    card_metric(d, (300, 445, 540, 700), "CAD / IRR", fmt_num(snapshot.get("cad_irr_toman")), "تومان • محاسبه‌ای", None, (54, 130, 220), "=")
+    card_metric(d, (560, 445, 800, 700), "طلای 18 عیار", fmt_num(snapshot.get("iran_gold18_toman_g")), "تومان / گرم", snapshot.get("iran_gold18_change_pct"), (34, 214, 110), badge_for(st.get("iran_gold18_toman_g")))
+    card_metric(d, (820, 445, 1040, 700), "سکه امامی", fmt_num(snapshot.get("emami_coin_toman")), "تومان", snapshot.get("emami_coin_change_pct"), (34, 214, 110), badge_for(st.get("emami_coin_toman")))
+
+    d.text((46, 740), rtl("ارزان‌ترین بلیت رفت و برگشت"), font=font(30, True), fill=(242, 245, 247))
+    flight_card(d, (40, 800, 520, 1085), "مونترال ⇄ تهران", snapshot.get("iran_flight") or {}, (56, 139, 253), badge_for(snapshot.get("iran_flight_status")))
+    flight_card(d, (560, 800, 1040, 1085), "مونترال ⇄ ونکوور", snapshot.get("vancouver_flight") or {}, (34, 214, 110), badge_for(snapshot.get("vancouver_flight_status")))
+
+    rounded(d, (40, 1120, 1040, 1310), fill=(8, 18, 25), outline=(44, 60, 72), width=2)
+    d.text((64, 1143), rtl("وضعیت اعتبار"), font=font(28, True), fill=(242, 245, 247))
+    warns = snapshot.get("warnings") or []
+    if not warns:
+        d.text((64, 1200), rtl("اعداد اصلی بررسی شده‌اند؛ مقادیر محاسبه‌ای مشخص شده‌اند."), font=font(22), fill=(34, 214, 110))
     else:
-        y = 1195
-        for a in alerts[:2]:
-            d.text((64,y), rtl("• " + str(a)), font=font(23), fill=(235,238,242))
-            y += 42
-    d.text((48,1350), rtl("اعداد فقط پس از تطبیق دو منبع نمایش داده می‌شوند؛ موارد نامطمئن با — پنهان می‌شوند."), font=font(18), fill=(135,148,158))
-    d.text((48,1392), rtl("CAD/IRR از USD/IRR ÷ USD/CAD محاسبه می‌شود."), font=font(18), fill=(135,148,158))
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    return buf.getvalue()
+        d.text((64, 1200), rtl("برخی آیتم‌ها اختلاف منبع داشتند و با ! مشخص شده‌اند."), font=font(22), fill=(255, 190, 60))
+
+    srcs = ", ".join((snapshot.get("sources") or [])[:5])
+    d.text((48, 1350), rtl("✓ منبع اصلی معتبر نمایش داده می‌شود؛ منبع دوم نقش کنترل دارد."), font=font(19), fill=(155, 168, 180))
+    if srcs:
+        d.text((48, 1390), f"Sources: {srcs}", font=font(16), fill=(125, 138, 150))
+    d.text((48, 1430), rtl("↺ یعنی آخرین مقدار معتبر قبلی حفظ شده است."), font=font(17), fill=(125, 138, 150))
+
+    b = io.BytesIO()
+    img.save(b, format="PNG", optimize=True)
+    return b.getvalue()
 
 
 def inline_buttons(snapshot):
     rows = []
-    iurl = (snapshot.get("iran_flight") or {}).get("source_url")
-    vurl = (snapshot.get("vancouver_flight") or {}).get("source_url")
-    if iurl and vurl:
-        rows.append([{"text":"✈️ تهران","url":iurl},{"text":"✈️ ونکوور","url":vurl}])
-    elif iurl:
-        rows.append([{"text":"✈️ تهران","url":iurl}])
-    elif vurl:
-        rows.append([{"text":"✈️ ونکوور","url":vurl}])
+    ir = (snapshot.get("iran_flight") or {}).get("source_url")
+    va = (snapshot.get("vancouver_flight") or {}).get("source_url")
+    if ir:
+        rows.append([{"text": "✈️ بررسی بلیت تهران", "url": ir}])
+    if va:
+        rows.append([{"text": "✈️ بررسی بلیت ونکوور", "url": va}])
     return rows
-
-
-def send_dashboard(chat_id):
-    with LOCK:
-        snap = SNAPSHOT
-    if not snap:
-        telegram_send_message("⏳ داده تأییدشده هنوز آماده نیست. در حال بررسی دو منبع مستقل...", chat_id, True)
-        trigger_refresh(chat_id)
-        return
-    telegram_send_photo(render_dashboard(snap), "✅ فقط داده‌های تأییدشده نمایش داده شده‌اند.", chat_id, inline_buttons(snap))
 
 
 def refresh_worker(notify_chat=None):
@@ -445,21 +462,22 @@ def refresh_worker(notify_chat=None):
     try:
         with LOCK:
             old = dict(SNAPSHOT) if SNAPSHOT else None
-        new = build_verified_snapshot(old)
+        fresh = build_snapshot(old)
         with LOCK:
-            SNAPSHOT, SNAPSHOT_TIME = new, time.time()
+            SNAPSHOT = fresh
+            SNAPSHOT_TIME = time.time()
         if notify_chat:
-            send_dashboard(notify_chat)
+            telegram_send_photo(render_dashboard(fresh), "✅ داشبورد به‌روزرسانی شد.", notify_chat, inline_buttons(fresh))
     except Exception as exc:
         print(f"[{VERSION}] refresh error: {type(exc).__name__}: {exc}", flush=True)
         if notify_chat:
-            telegram_send_message("⚠️ بررسی دو منبع کامل نشد؛ داده قبلی حفظ شد.", notify_chat, True)
+            telegram_send_message("⚠️ بروزرسانی کامل نشد؛ آخرین داده معتبر قبلی حفظ شد.", notify_chat, menu=True)
     finally:
         with LOCK:
             REFRESHING = False
 
 
-def trigger_refresh(notify_chat=None):
+def start_refresh(notify_chat=None):
     global REFRESHING
     with LOCK:
         if REFRESHING:
@@ -469,25 +487,52 @@ def trigger_refresh(notify_chat=None):
     return True
 
 
-def handle_message(msg):
-    chat_id = str(msg.get("chat", {}).get("id", ""))
-    if not chat_id or chat_id != TELEGRAM_CHAT_ID:
-        return
-    raw = (msg.get("text") or "").strip()
-    low = raw.lower()
-    if low in {"/start","/help","hello","hi"}:
-        telegram_send_message("✅ Metra Verified Dashboard\nعدد مشکوک نمایش داده نمی‌شود؛ صحت از کامل‌بودن مهم‌تر است.", chat_id, True)
-    elif raw == "📊 داشبورد تأییدشده" or low in {"/dashboard","📊 داشبورد فوری"}:
-        send_dashboard(chat_id)
-    elif raw == "🔄 بررسی مجدد" or low in {"/refresh","🔄 بروزرسانی"}:
-        if trigger_refresh(chat_id):
-            telegram_send_message("🔎 تطبیق دو منبع مستقل شروع شد. نتیجه فقط پس از تأیید ارسال می‌شود.", chat_id, True)
-        else:
-            telegram_send_message("⏳ بررسی از قبل در حال انجام است.", chat_id, True)
-    elif raw in {"💰 ارز و طلا","✈️ بلیط‌ها","🚨 هشدارها"}:
-        send_dashboard(chat_id)
+def show_dashboard(chat_id):
+    with LOCK:
+        snap = dict(SNAPSHOT) if SNAPSHOT else None
+        age = time.time() - SNAPSHOT_TIME if SNAPSHOT_TIME else 10**9
+    if snap:
+        telegram_send_photo(render_dashboard(snap), "📊 داشبورد", chat_id, inline_buttons(snap))
+        if age > TTL:
+            start_refresh()
     else:
-        telegram_send_message("یکی از دکمه‌ها را انتخاب کن.", chat_id, True)
+        start_refresh(chat_id)
+        telegram_send_message("⏳ اولین داشبورد در حال آماده‌شدن است.", chat_id, menu=True)
+
+
+def handle_message(message):
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    if not chat_id:
+        return
+    if chat_id != TELEGRAM_CHAT_ID:
+        telegram_send_message("این ربات خصوصی است.", chat_id, menu=False)
+        return
+    raw = (message.get("text") or "").strip()
+    low = raw.lower()
+    if low in {"/start", "/help", "hello", "hi"}:
+        telegram_send_message("📊 Metra Trusted Dashboard\nعدد اصلی از منبع معتبر می‌آید؛ منبع دوم فقط برای کنترل است.", chat_id, menu=True)
+    elif raw == "📊 داشبورد" or low == "/dashboard":
+        show_dashboard(chat_id)
+    elif raw == "💰 ارز و طلا":
+        show_dashboard(chat_id)
+    elif raw == "✈️ بلیط‌ها":
+        show_dashboard(chat_id)
+    elif raw == "🚨 هشدارها":
+        with LOCK:
+            snap = dict(SNAPSHOT) if SNAPSHOT else None
+        if not snap:
+            telegram_send_message("هنوز داده‌ای آماده نیست.", chat_id, menu=True)
+        elif snap.get("warnings"):
+            telegram_send_message("⚠️ برخی آیتم‌ها اختلاف منبع دارند و در داشبورد با ! مشخص شده‌اند.", chat_id, menu=True)
+        else:
+            telegram_send_message("✅ هشدار اعتبار مهمی وجود ندارد.", chat_id, menu=True)
+    elif raw == "🔄 بررسی مجدد" or low == "/refresh":
+        if start_refresh(chat_id):
+            telegram_send_message("🔄 بررسی مجدد شروع شد؛ بعد از تکمیل تصویر جدید خودکار می‌آید.", chat_id, menu=True)
+        else:
+            telegram_send_message("⏳ بررسی در حال انجام است.", chat_id, menu=True)
+    else:
+        telegram_send_message("یکی از دکمه‌های منو را انتخاب کن.", chat_id, menu=True)
 
 
 def scheduler_loop():
@@ -496,7 +541,7 @@ def scheduler_loop():
             with LOCK:
                 age = time.time() - SNAPSHOT_TIME if SNAPSHOT_TIME else 10**9
             if age > TTL:
-                trigger_refresh()
+                start_refresh()
         except Exception as exc:
             print(f"[{VERSION}] scheduler error: {exc}", flush=True)
         time.sleep(60)
@@ -508,21 +553,21 @@ def polling_loop():
     while True:
         try:
             data = get_updates(offset)
-            for u in data.get("result", []):
-                offset = u["update_id"] + 1
-                if u.get("message"):
-                    handle_message(u["message"])
+            for update in data.get("result", []):
+                offset = update["update_id"] + 1
+                if update.get("message"):
+                    handle_message(update["message"])
         except Exception as exc:
-            print(f"[{VERSION}] telegram loop error: {type(exc).__name__}: {exc}", flush=True)
+            print(f"[{VERSION}] telegram error: {type(exc).__name__}: {exc}", flush=True)
             time.sleep(2)
 
 
 def startup():
     print(f"[{VERSION}] START", flush=True)
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    trigger_refresh()
+    start_refresh()
     try:
-        telegram_send_message("✅ V8 فعال شد — از این پس فقط داده‌های دو-منبعی و سازگار نمایش داده می‌شوند.", TELEGRAM_CHAT_ID, True)
+        telegram_send_message("✅ V9 فعال شد — منبع اصلی نمایش داده می‌شود و منبع دوم نقش کنترل دارد.", TELEGRAM_CHAT_ID, menu=True)
     except Exception as exc:
         print(f"[{VERSION}] startup telegram error: {exc}", flush=True)
     polling_loop()
