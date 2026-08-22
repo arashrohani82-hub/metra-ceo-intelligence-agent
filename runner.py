@@ -1,7 +1,7 @@
 import time
 from datetime import date, datetime
 
-import main as bot
+from main_v12 import app as bot
 
 bot.VERSION = "CEO-BOT-V13-FLIGHTS"
 
@@ -53,7 +53,7 @@ B) Montreal YUL <-> Vancouver YVR: departure within next 60 days, stay 3-7 night
 Accuracy rules:
 - A fare is usable only if one source visibly supports the TOTAL ROUND-TRIP CAD price and exact outbound + return dates for the SAME itinerary.
 - Reject one-way prices, 'from' teaser prices, monthly estimates, stale snippets, packages, points, or mixed itineraries.
-- Prefer Google Flights / airline / major booking-engine result pages when visible.
+- Prefer Google Flights, airline sites, and major booking-engine result pages when the exact itinerary is visible.
 - If no defensible fare is visible for a route, return nulls for that route. Never estimate.
 - source_url must be the URL supporting that exact fare or the closest directly-checkable booking/search page.
 
