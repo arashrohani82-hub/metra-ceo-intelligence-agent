@@ -49,7 +49,6 @@ def fetch_usdcad_boc_v12():
 
 app.fetch_usdcad_boc = fetch_usdcad_boc_v12
 
-# Display-only conversion. Stored/source values remain untouched in toman.
 _base_render_dashboard = app.render_dashboard
 
 
@@ -59,29 +58,24 @@ def truncate_3_decimals(value):
 
 
 def render_dashboard_v12(s):
+    # Keep the original raw toman values intact. The base renderer formats numbers
+    # to zero decimals before calling metric(), so for these two cards we bypass
+    # that already-rounded display string and rebuild it from the raw snapshot.
     view = dict(s)
-    coin = app.fv(view.get("emami_coin_toman"))
-    gold18 = app.fv(view.get("iran_gold18_toman_g"))
-    if coin is not None:
-        view["emami_coin_toman"] = truncate_3_decimals(coin / 1_000_000.0)
-    if gold18 is not None:
-        view["iran_gold18_toman_g"] = truncate_3_decimals(gold18 / 1_000_000.0)
+    raw_coin = app.fv(s.get("emami_coin_toman"))
+    raw_gold18 = app.fv(s.get("iran_gold18_toman_g"))
 
     original_metric = app.metric
 
     def metric_compact(d, box, title, value, sub="", change=None, accent=(46, 204, 113), b=""):
         if title == "سکه امامی":
             sub = "میلیون تومان"
-            try:
-                value = f"{truncate_3_decimals(float(value.replace(',', ''))):.3f}"
-            except Exception:
-                pass
+            if raw_coin is not None:
+                value = f"{truncate_3_decimals(raw_coin / 1_000_000.0):.3f}"
         elif title == "طلای 18 عیار":
             sub = "میلیون تومان / گرم"
-            try:
-                value = f"{truncate_3_decimals(float(value.replace(',', ''))):.3f}"
-            except Exception:
-                pass
+            if raw_gold18 is not None:
+                value = f"{truncate_3_decimals(raw_gold18 / 1_000_000.0):.3f}"
         return original_metric(d, box, title, value, sub, change, accent, b)
 
     app.metric = metric_compact
