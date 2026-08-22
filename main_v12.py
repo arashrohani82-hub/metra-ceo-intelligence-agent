@@ -1,8 +1,8 @@
 """V12 runtime patch for Metra CEO dashboard.
 
 Keeps the stable V11 dashboard, fixes USD/CAD using the correct Bank of Canada
-series (FXUSDCAD), cross-checks it against CAD/USD, and renders Emami coin in
-million toman so the value fits cleanly inside its dashboard card.
+series (FXUSDCAD), cross-checks it against CAD/USD, and renders Iranian gold
+and coin values compactly in million toman without changing stored source data.
 """
 
 import main as app
@@ -48,29 +48,37 @@ def fetch_usdcad_boc_v12():
 
 app.fetch_usdcad_boc = fetch_usdcad_boc_v12
 
-# Preserve the underlying coin value in toman; change display only.
+# Display-only conversion. Stored/source values remain untouched in toman.
 _base_render_dashboard = app.render_dashboard
 
 
 def render_dashboard_v12(s):
     view = dict(s)
     coin = app.fv(view.get("emami_coin_toman"))
+    gold18 = app.fv(view.get("iran_gold18_toman_g"))
     if coin is not None:
         view["emami_coin_toman"] = coin / 1_000_000.0
+    if gold18 is not None:
+        view["iran_gold18_toman_g"] = gold18 / 1_000_000.0
 
-    # Temporarily adapt only the metric call for the Emami card by wrapping metric.
     original_metric = app.metric
 
-    def metric_with_coin_unit(d, box, title, value, sub="", change=None, accent=(46, 204, 113), b=""):
+    def metric_compact(d, box, title, value, sub="", change=None, accent=(46, 204, 113), b=""):
         if title == "سکه امامی":
             sub = "میلیون تومان"
             try:
-                value = f"{float(value.replace(',', '')):.1f}"
+                value = f"{float(value.replace(',', '')):.3f}"
+            except Exception:
+                pass
+        elif title == "طلای 18 عیار":
+            sub = "میلیون تومان / گرم"
+            try:
+                value = f"{float(value.replace(',', '')):.3f}"
             except Exception:
                 pass
         return original_metric(d, box, title, value, sub, change, accent, b)
 
-    app.metric = metric_with_coin_unit
+    app.metric = metric_compact
     try:
         return _base_render_dashboard(view)
     finally:
