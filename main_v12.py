@@ -5,6 +5,7 @@ series (FXUSDCAD), cross-checks it against CAD/USD, and renders Iranian gold
 and coin values compactly in million toman without changing stored source data.
 """
 
+import math
 import main as app
 
 app.VERSION = "CEO-BOT-V12-FX-FIX"
@@ -52,14 +53,19 @@ app.fetch_usdcad_boc = fetch_usdcad_boc_v12
 _base_render_dashboard = app.render_dashboard
 
 
+def truncate_3_decimals(value):
+    """Keep exactly 3 decimals by truncation, never rounding."""
+    return math.trunc(float(value) * 1000) / 1000.0
+
+
 def render_dashboard_v12(s):
     view = dict(s)
     coin = app.fv(view.get("emami_coin_toman"))
     gold18 = app.fv(view.get("iran_gold18_toman_g"))
     if coin is not None:
-        view["emami_coin_toman"] = coin / 1_000_000.0
+        view["emami_coin_toman"] = truncate_3_decimals(coin / 1_000_000.0)
     if gold18 is not None:
-        view["iran_gold18_toman_g"] = gold18 / 1_000_000.0
+        view["iran_gold18_toman_g"] = truncate_3_decimals(gold18 / 1_000_000.0)
 
     original_metric = app.metric
 
@@ -67,13 +73,13 @@ def render_dashboard_v12(s):
         if title == "سکه امامی":
             sub = "میلیون تومان"
             try:
-                value = f"{float(value.replace(',', '')):.3f}"
+                value = f"{truncate_3_decimals(float(value.replace(',', ''))):.3f}"
             except Exception:
                 pass
         elif title == "طلای 18 عیار":
             sub = "میلیون تومان / گرم"
             try:
-                value = f"{float(value.replace(',', '')):.3f}"
+                value = f"{truncate_3_decimals(float(value.replace(',', ''))):.3f}"
             except Exception:
                 pass
         return original_metric(d, box, title, value, sub, change, accent, b)
