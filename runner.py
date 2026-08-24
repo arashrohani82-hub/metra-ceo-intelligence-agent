@@ -1,4 +1,8 @@
 from main_v12 import app as bot
+import json
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 bot.VERSION = "CEO-BOT-V15-MARKETS-ONLY"
 
@@ -72,5 +76,40 @@ def market_only_handle_message(m):
 
 bot.handle_message = market_only_handle_message
 
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def _send_json(self, status_code, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path in ("/", "/status", "/health"):
+            self._send_json(
+                200,
+                {
+                    "status": "ok",
+                    "service": "metra-ceo-intelligence-agent",
+                    "version": bot.VERSION,
+                },
+            )
+        else:
+            self._send_json(404, {"error": "not_found"})
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port = int(os.environ.get("PORT", "8080"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    print(f"[{bot.VERSION}] health server listening on 0.0.0.0:{port}", flush=True)
+    server.serve_forever()
+
+
 if __name__ == "__main__":
+    threading.Thread(target=start_health_server, daemon=True).start()
     bot.startup()
