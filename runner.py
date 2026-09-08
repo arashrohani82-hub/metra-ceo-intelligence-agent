@@ -1,17 +1,19 @@
 from main_v12 import app as bot
 from direct_auctions import search_lab_auctions
+from direct_lab_rentals import search_lab_rentals
 import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-bot.VERSION = "CEO-BOT-V19-LAB-ACQUISITION"
+bot.VERSION = "CEO-BOT-V20-LAB-SETUP"
 
 MAIN_MENU = {
     "keyboard": [
         [{"text": "📊 داشبورد"}],
         [{"text": "💰 ارز و طلا"}],
         [{"text": "🧪 خرید آزمایشگاه و تجهیزات"}],
+        [{"text": "🏭 اجاره فضای آزمایشگاه"}],
         [{"text": "🚨 هشدارها"}, {"text": "🔄 بررسی مجدد"}],
     ],
     "resize_keyboard": True,
@@ -30,6 +32,19 @@ AUCTION_MENU = {
     "resize_keyboard": True,
     "is_persistent": True,
     "input_field_placeholder": "نوع جست‌وجو را انتخاب کن",
+}
+
+RENTAL_MENU = {
+    "keyboard": [
+        [{"text": "🏙 Montréal"}, {"text": "🏢 Laval"}],
+        [{"text": "🌉 Longueuil / Rive-Sud"}],
+        [{"text": "✈️ West Island"}],
+        [{"text": "📍 Grand Montréal"}],
+        [{"text": "🔙 بازگشت"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "منطقه اجاره را انتخاب کن",
 }
 
 bot.MAIN_KEYBOARD = MAIN_MENU
@@ -87,7 +102,7 @@ def diagnostics_text(data):
         lines.append(f"• {name}: {hits} نتیجه | {inspected} بررسی | {accepted} نمایش")
         if closed or low or filtered:
             lines.append(f"  حذف: {closed} بسته + {low} ضعیف + {filtered} خارج از فیلتر")
-        errs = st.get("search_errors") or []
+        errs = st.get("search_errors") or st.get("errors") or []
         if errs:
             lines.append("  ⚠️ " + ", ".join(errs[:2]))
     return "\n".join(lines)
@@ -110,8 +125,7 @@ def auction_results_text(data):
         msg = (
             "🧪 خرید آزمایشگاه و تجهیزات\n\n"
             f"فیلتر: {mode_label}\n"
-            "فعلاً Listing مناسبی پیدا نشد، اما جست‌وجو فقط به دستگاه‌های تخصصی محدود نیست؛ "
-            "Lotهای عمومی آزمایشگاه، تجهیزات مهندسی، Materials Testing و Liquidation هم بررسی شدند."
+            "فعلاً Listing مناسبی پیدا نشد، اما Lotهای عمومی آزمایشگاه، تجهیزات مهندسی، Materials Testing و Liquidation هم بررسی شدند."
         )
         msg += diagnostics_text(data)
         if errors:
@@ -147,6 +161,60 @@ def auction_results_text(data):
     lines.append(diagnostics_text(data))
     if errors:
         lines.append("⚠️ برخی جست‌وجوها پاسخ کامل ندادند: " + ", ".join(errors[:5]))
+    if checked_at:
+        lines.append(f"🕒 بررسی: {checked_at}")
+    return "\n".join(x for x in lines if x is not None)
+
+
+def rental_results_text(data):
+    items = (data or {}).get("items") or []
+    checked_at = (data or {}).get("checked_at") or ""
+    region = (data or {}).get("region") or "grandmontreal"
+    labels = {
+        "montreal": "Montréal",
+        "laval": "Laval",
+        "southshore": "Longueuil / Rive-Sud",
+        "westisland": "West Island",
+        "grandmontreal": "Grand Montréal",
+    }
+    title = labels.get(region, region)
+
+    if not items:
+        msg = (
+            f"🏭 اجاره فضای آزمایشگاه — {title}\n\n"
+            "فعلاً فضای صنعتی مناسب و قابل‌اعتماد پیدا نشد. ربات دنبال فضای صنعتی/فلکس با امکان garage/loading، برق مناسب، آب/درین و شرایط قابل‌بررسی برای آزمایشگاه خاک، بتن و آسفالت می‌گردد."
+        )
+        msg += diagnostics_text(data)
+        if checked_at:
+            msg += f"\n\n🕒 بررسی: {checked_at}"
+        return msg
+
+    lines = [f"🏭 اجاره فضای آزمایشگاه — {title}", "🌐 Direct web search", ""]
+    for i, item in enumerate(items[:12], 1):
+        lines.append(f"{i}) {item.get('title') or 'بدون عنوان'}")
+        if item.get("address"):
+            lines.append(f"   📍 {item.get('address')}")
+        details = []
+        if item.get("area_sf"):
+            details.append(f"{item.get('area_sf'):,} ft²")
+        if item.get("price_per_sf") is not None:
+            details.append(f"${item.get('price_per_sf'):,.2f}/ft²")
+        if item.get("monthly_rent") is not None:
+            details.append(f"${item.get('monthly_rent'):,.0f}/mois")
+        details.append(f"⭐ {item.get('suitability_score') or '-'} / 100")
+        lines.append("   📐 " + " | ".join(details))
+        features = item.get("features") or []
+        if features:
+            lines.append("   ✅ " + ", ".join(features))
+        lines.append("   💡 امتیاز بر اساس تناسب اولیه برای آزمایشگاه مصالح است؛ zoning، ظرفیت کف، برق و drain باید قبل از اجاره تأیید شوند.")
+        if item.get("source_name"):
+            engine = item.get("search_engine")
+            lines.append(f"   🔎 {item.get('source_name')}{(' / ' + engine) if engine else ''}")
+        if item.get("source_url"):
+            lines.append(f"   🔗 {item.get('source_url')}")
+        lines.append("")
+
+    lines.append(diagnostics_text(data))
     if checked_at:
         lines.append(f"🕒 بررسی: {checked_at}")
     return "\n".join(x for x in lines if x is not None)
@@ -189,6 +257,27 @@ def start_auction_search(chat_id, mode):
     return True
 
 
+def run_rental_search(chat_id, region):
+    try:
+        data = search_lab_rentals(region=region)
+        send_long(rental_results_text(data), chat_id)
+    except Exception as exc:
+        print(f"[{bot.VERSION}] rental search: {type(exc).__name__}: {exc}", flush=True)
+        bot.telegram_send_message("⚠️ جست‌وجوی فضای اجاره‌ای فعلاً کامل نشد. چند دقیقه دیگر دوباره امتحان کن.", chat_id, True)
+    finally:
+        with bot.LOCK:
+            bot.REFRESHING.discard("lab_rentals")
+
+
+def start_rental_search(chat_id, region):
+    with bot.LOCK:
+        if "lab_rentals" in bot.REFRESHING:
+            return False
+        bot.REFRESHING.add("lab_rentals")
+    bot.EXECUTOR.submit(run_rental_search, chat_id, region)
+    return True
+
+
 def launch_mode(chat_id, mode, label):
     if start_auction_search(chat_id, mode):
         bot.telegram_send_message(
@@ -198,6 +287,17 @@ def launch_mode(chat_id, mode, label):
         )
     else:
         bot.telegram_send_message("⏳ جست‌وجوی مزایده از قبل در حال انجام است.", chat_id, True)
+
+
+def launch_rental(chat_id, region, label):
+    if start_rental_search(chat_id, region):
+        bot.telegram_send_message(
+            f"🔎 در حال جست‌وجوی فضای مناسب آزمایشگاه در {label}…\nفضاهای industrial/flex با garage/loading، برق مناسب، آب/drain و امکان استفاده آزمایشگاهی بررسی می‌شوند.",
+            chat_id,
+            True,
+        )
+    else:
+        bot.telegram_send_message("⏳ جست‌وجوی اجاره از قبل در حال انجام است.", chat_id, True)
 
 
 def handle_message(m):
@@ -210,7 +310,7 @@ def handle_message(m):
     if low in {"/start", "/help", "hello", "hi"}:
         set_menu(MAIN_MENU)
         bot.telegram_send_message(
-            "📊 Metra CEO Intelligence\n🧪 بخش خرید آزمایشگاه و تجهیزات، مزایده‌ها، Liquidation و Surplus را مستقیم از وب بررسی می‌کند.",
+            "📊 Metra CEO Intelligence\n🧪 خرید تجهیزات و مزایده‌ها\n🏭 اجاره فضای مناسب آزمایشگاه مصالح",
             chat_id,
             True,
         )
@@ -219,8 +319,11 @@ def handle_message(m):
         bot.show_dashboard(chat_id)
     elif raw == "🧪 خرید آزمایشگاه و تجهیزات" or low in {"/auction", "/auctions"}:
         set_menu(AUCTION_MENU)
+        bot.telegram_send_message("🧪 چه نوع فرصتی را جست‌وجو کنم؟", chat_id, True)
+    elif raw == "🏭 اجاره فضای آزمایشگاه" or low in {"/rentlab", "/labspace"}:
+        set_menu(RENTAL_MENU)
         bot.telegram_send_message(
-            "🧪 چه نوع فرصتی را جست‌وجو کنم؟\nمی‌توانی منطقه جغرافیایی یا نوع فروش را انتخاب کنی.",
+            "🏭 کدام منطقه را برای فضای آزمایشگاه بررسی کنم؟\nفضاهای صنعتی مناسب Soil / Concrete / Asphalt Lab اولویت دارند.",
             chat_id,
             True,
         )
@@ -239,6 +342,21 @@ def handle_message(m):
     elif raw == "🏛 Government / University Surplus":
         set_menu(AUCTION_MENU)
         launch_mode(chat_id, "govuni", "Government / University Surplus")
+    elif raw == "🏙 Montréal":
+        set_menu(RENTAL_MENU)
+        launch_rental(chat_id, "montreal", "Montréal")
+    elif raw == "🏢 Laval":
+        set_menu(RENTAL_MENU)
+        launch_rental(chat_id, "laval", "Laval")
+    elif raw == "🌉 Longueuil / Rive-Sud":
+        set_menu(RENTAL_MENU)
+        launch_rental(chat_id, "southshore", "Longueuil / Rive-Sud")
+    elif raw == "✈️ West Island":
+        set_menu(RENTAL_MENU)
+        launch_rental(chat_id, "westisland", "West Island")
+    elif raw == "📍 Grand Montréal":
+        set_menu(RENTAL_MENU)
+        launch_rental(chat_id, "grandmontreal", "Grand Montréal")
     elif raw == "🔙 بازگشت":
         set_menu(MAIN_MENU)
         bot.telegram_send_message("به منوی اصلی برگشتی.", chat_id, True)
@@ -279,7 +397,9 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "service": "metra-ceo-intelligence-agent",
                 "version": bot.VERSION,
                 "lab_acquisition_tab": True,
+                "lab_rental_tab": True,
                 "auction_mode": "direct-web-broad-lab-acquisition",
+                "rental_mode": "direct-web-lab-rental",
             })
         else:
             self._send_json(404, {"error": "not_found"})
