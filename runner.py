@@ -5,7 +5,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-bot.VERSION = "CEO-BOT-V17-DIRECT-LAB-AUCTIONS"
+bot.VERSION = "CEO-BOT-V18-AUCTION-DIAGNOSTICS"
 
 bot.MAIN_KEYBOARD = {
     "keyboard": [
@@ -53,22 +53,47 @@ def fmt_money(v):
         return "نامشخص"
 
 
+def diagnostics_text(data):
+    diagnostics = (data or {}).get("diagnostics") or {}
+    if not diagnostics:
+        return ""
+    lines = ["", "📡 گزارش منابع بررسی‌شده:"]
+    for name, st in diagnostics.items():
+        hits = int(st.get("search_hits") or 0)
+        inspected = int(st.get("inspected") or 0)
+        accepted = int(st.get("accepted") or 0)
+        closed = int(st.get("closed") or 0)
+        low = int(st.get("low_relevance") or 0)
+        lines.append(f"• {name}: {hits} نتیجه جست‌وجو | {inspected} بررسی | {accepted} مرتبط")
+        if closed or low:
+            lines.append(f"  حذف‌شده: {closed} بسته + {low} کم‌ارتباط")
+        errs = st.get("search_errors") or []
+        if errs:
+            lines.append("  ⚠️ " + ", ".join(errs[:2]))
+    return "\n".join(lines)
+
+
 def auction_results_text(data):
     items = (data or {}).get("items") or []
     errors = (data or {}).get("errors") or []
+    checked_at = (data or {}).get("checked_at") or ""
+
     if not items:
         msg = (
             "🧪 مزایده تجهیزات آزمایشگاه\n\n"
-            "فعلاً مورد فعال و مرتبطِ قابل‌اعتماد برای تجهیزات خاک، بتن یا آسفالت پیدا نشد.\n"
-            "جست‌وجو مستقیم از وب انجام شد و به OpenAI وابسته نیست."
+            "فعلاً Listing فعال و مرتبطِ قابل‌اعتمادی برای تجهیزات خاک، بتن یا آسفالت پیدا نشد.\n"
+            "این بار جست‌وجو با چند موتور جست‌وجو و چند کلیدواژه جدا برای هر منبع انجام شد."
         )
+        msg += diagnostics_text(data)
         if errors:
-            msg += "\n\n⚠️ بعضی منابع موقتاً پاسخ ندادند: " + ", ".join(errors[:4])
+            msg += "\n\n⚠️ خطاهای منبع: " + ", ".join(errors[:5])
+        if checked_at:
+            msg += f"\n\n🕒 بررسی: {checked_at}"
         return msg
 
     labels = {"soil": "خاک", "concrete": "بتن", "asphalt": "آسفالت", "general": "عمومی"}
-    lines = ["🧪 مزایده تجهیزات آزمایشگاه", "🌐 Direct web search — بدون وابستگی به OpenAI", ""]
-    for i, item in enumerate(items[:8], 1):
+    lines = ["🧪 مزایده تجهیزات آزمایشگاه", "🌐 Direct multi-source search — بدون وابستگی به OpenAI", ""]
+    for i, item in enumerate(items[:10], 1):
         category = labels.get(str(item.get("category") or "").lower(), "عمومی")
         lines.append(f"{i}) {item.get('title') or 'بدون عنوان'}")
         lines.append(f"   🧭 {item.get('location') or 'مکان نامشخص'} | 🧱 {category} | ⭐ {item.get('relevance_score') or '-'} / 100")
@@ -81,15 +106,20 @@ def auction_results_text(data):
         if item.get("why_it_matters"):
             lines.append(f"   💡 {item.get('why_it_matters')}")
         if item.get("source_name"):
-            lines.append(f"   🔎 {item.get('source_name')}")
+            engine = item.get("search_engine")
+            src = item.get("source_name") + (f" / {engine}" if engine else "")
+            lines.append(f"   🔎 {src}")
         if item.get("source_url"):
             lines.append(f"   🔗 {item.get('source_url')}")
         lines.append("")
 
     lines.append("اولویت: Québec → Ontario → بقیه کانادا")
+    lines.append(diagnostics_text(data))
     if errors:
-        lines.append("⚠️ برخی منابع موقتاً پاسخ ندادند: " + ", ".join(errors[:4]))
-    return "\n".join(lines)
+        lines.append("⚠️ برخی جست‌وجوها پاسخ کامل ندادند: " + ", ".join(errors[:5]))
+    if checked_at:
+        lines.append(f"🕒 بررسی: {checked_at}")
+    return "\n".join(x for x in lines if x is not None)
 
 
 def send_long(text, chat_id):
@@ -142,7 +172,7 @@ def handle_message(m):
 
     if low in {"/start", "/help", "hello", "hi"}:
         bot.telegram_send_message(
-            "📊 Metra CEO Intelligence\nارز و طلا مستقیم از منابع داده دریافت می‌شوند.\n🧪 مزایده‌ها نیز مستقیماً از وب جست‌وجو می‌شوند و به OpenAI وابسته نیستند.",
+            "📊 Metra CEO Intelligence\nارز و طلا مستقیم از منابع داده دریافت می‌شوند.\n🧪 مزایده‌ها با جست‌وجوی چندمنبعی مستقیم بررسی می‌شوند.",
             chat_id,
             True,
         )
@@ -151,7 +181,7 @@ def handle_message(m):
     elif raw == "🧪 مزایده تجهیزات آزمایشگاه" or low in {"/auction", "/auctions"}:
         if start_auction_search(chat_id):
             bot.telegram_send_message(
-                "🔎 در حال جست‌وجوی مستقیم مزایده‌های تجهیزات Soil / Concrete / Asphalt در کانادا…",
+                "🔎 در حال بررسی GCSurplus، GovDeals، HiBid، Ritchie Bros و مزایده‌های صنعتی برای Soil / Concrete / Asphalt…",
                 chat_id,
                 True,
             )
@@ -192,7 +222,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "service": "metra-ceo-intelligence-agent",
                 "version": bot.VERSION,
                 "lab_auction_tab": True,
-                "auction_mode": "direct-web-no-openai",
+                "auction_mode": "direct-web-multi-engine-no-openai",
             })
         else:
             self._send_json(404, {"error": "not_found"})
