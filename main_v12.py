@@ -1,12 +1,13 @@
 """V12 runtime patch for Metra CEO dashboard.
 
 Keeps the stable V11 dashboard, fixes USD/CAD using the correct Bank of Canada
-series (FXUSDCAD), cross-checks it against CAD/USD, and renders Iranian gold
-and coin values compactly in million toman without changing stored source data.
+series (FXUSDCAD), cross-checks it against CAD/USD, renders Iranian gold and
+coin values compactly, and appends official Montreal permit-market analytics.
 """
 
 import math
 import main as app
+import permits_patch
 
 app.VERSION = "CEO-BOT-V12-FX-FIX"
 
@@ -86,6 +87,29 @@ def render_dashboard_v12(s):
 
 
 app.render_dashboard = render_dashboard_v12
+
+# show_dashboard is deliberately wrapped here instead of render_dashboard.
+# runner.py adds Prime + weather after importing this module; wrapping at send
+# time therefore appends permits to the final, fully composed dashboard image.
+_base_show_dashboard = app.show_dashboard
+
+
+def show_dashboard_with_permits(chat_id):
+    current_render = app.render_dashboard
+
+    def final_render(snapshot):
+        raw = current_render(snapshot)
+        return permits_patch.append_permits(app, raw)
+
+    app.render_dashboard = final_render
+    try:
+        return _base_show_dashboard(chat_id)
+    finally:
+        app.render_dashboard = current_render
+
+
+app.show_dashboard = show_dashboard_with_permits
+app.fetch_montreal_permits = lambda force=False: permits_patch.fetch_permits(app, force=force)
 
 
 if __name__ == "__main__":
