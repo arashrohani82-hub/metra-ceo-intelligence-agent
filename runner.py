@@ -6,7 +6,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-bot.VERSION = "CEO-BOT-V23-MONTREAL-WEATHER"
+bot.VERSION = "CEO-BOT-V24-PRIME"
 
 MAIN_MENU = {
     "keyboard": [
@@ -21,17 +21,20 @@ MAIN_MENU = {
 
 bot.MAIN_KEYBOARD = MAIN_MENU
 
-# Montreal is the fixed reference for the CEO weather dashboard.
-WEATHER_LAT = 45.508822
-WEATHER_LON = -73.554077
+# Montreal is the fixed weather reference for the CEO dashboard.
+WEATHER_LAT = 45.5017
+WEATHER_LON = -73.5673
 WEATHER_CITY = "Montréal"
 WEATHER_COLD_C = float(os.environ.get("WEATHER_COLD_C", "-15"))
 WEATHER_DROP_C = float(os.environ.get("WEATHER_DROP_C", "10"))
 WEATHER_TTL = 30 * 60
 WEATHER_CHECK_INTERVAL = 6 * 60 * 60
+PRIME_TTL = 6 * 60 * 60
 
 _WEATHER_CACHE = {"at": 0.0, "data": None}
 _WEATHER_LOCK = threading.Lock()
+_PRIME_CACHE = {"at": 0.0, "data": None}
+_PRIME_LOCK = threading.Lock()
 _ALERTED_KEYS = set()
 
 
@@ -40,6 +43,43 @@ def no_flight_refresh(notify=None, force=False):
 
 
 bot.start_flight_refresh = no_flight_refresh
+
+
+def _fetch_prime(force=False):
+    """Latest Canadian major-bank prime rate from Bank of Canada weekly series V80691311."""
+    now = time.time()
+    with _PRIME_LOCK:
+        if not force and _PRIME_CACHE["data"] and now - _PRIME_CACHE["at"] < PRIME_TTL:
+            return _PRIME_CACHE["data"]
+
+    url = "https://www.bankofcanada.ca/valet/observations/V80691311/json"
+    payload = bot.safe_get(url, params={"recent": 4}, timeout=20).json()
+    rows = payload.get("observations") or []
+    values = []
+    for row in rows:
+        raw = (row.get("V80691311") or {}).get("v")
+        if raw is None:
+            continue
+        try:
+            values.append({"date": row.get("d") or "", "value": float(raw)})
+        except Exception:
+            continue
+    if not values:
+        raise RuntimeError("Bank of Canada prime rate unavailable")
+
+    latest = values[-1]
+    previous = values[-2] if len(values) > 1 else None
+    change = latest["value"] - previous["value"] if previous else None
+    result = {
+        "value": latest["value"],
+        "date": latest["date"],
+        "change": change,
+        "source": "Bank of Canada",
+    }
+    with _PRIME_LOCK:
+        _PRIME_CACHE["at"] = now
+        _PRIME_CACHE["data"] = result
+    return result
 
 
 def _fetch_weather(force=False):
@@ -87,13 +127,13 @@ def _fetch_weather(force=False):
                     "text": f"افت شدید دما: {drop:.0f}°C نسبت به روز قبل",
                 })
 
-    current_data = data.get("current") or {}
-    current_value = current_data.get("temperature_2m")
-    feels_value = current_data.get("apparent_temperature")
+    current = data.get("current") or {}
+    current_value = current.get("temperature_2m")
+    apparent_value = current.get("apparent_temperature")
     result = {
         "city": WEATHER_CITY,
         "current": float(current_value) if current_value is not None else None,
-        "feels_like": float(feels_value) if feels_value is not None else None,
+        "feels_like": float(apparent_value) if apparent_value is not None else None,
         "days": days,
         "alerts": alerts,
     }
@@ -154,7 +194,7 @@ def render_market_only(s):
 
     raw = _base_render(s)
     base = Image.open(io.BytesIO(raw)).convert("RGB").crop((0, 0, 1080, 790))
-    canvas = Image.new("RGB", (1080, 1130), (9, 15, 24))
+    canvas = Image.new("RGB", (1080, 1300), (9, 15, 24))
     canvas.paste(base, (0, 0))
     d = ImageDraw.Draw(canvas)
 
@@ -165,31 +205,56 @@ def render_market_only(s):
         fill=(125, 138, 150),
     )
 
-    y = 805
+    # Canadian Prime Rate
+    d.text((48, 805), bot.rtl("نرخ بهره کانادا"), font=bot.font(28), fill=(235, 241, 247))
+    try:
+        prime = _fetch_prime()
+        change = prime.get("change")
+        if change is None or abs(change) < 0.001:
+            movement = "بدون تغییر نسبت به هفته قبل"
+        elif change > 0:
+            movement = f"افزایش {change:.2f} واحد درصد"
+        else:
+            movement = f"کاهش {abs(change):.2f} واحد درصد"
+        _draw_card(
+            d,
+            (48, 850, 1032, 1000),
+            "Prime Rate کانادا",
+            f"{prime['value']:.2f}%",
+            f"Bank of Canada | {prime['date']} | {movement}",
+            (245, 158, 11),
+        )
+    except Exception as exc:
+        d.rounded_rectangle((48, 850, 1032, 1000), radius=18, fill=(36, 28, 28), outline=(239, 68, 68), width=2)
+        d.text((72, 900), bot.rtl("Prime Rate موقتاً در دسترس نیست"), font=bot.font(24), fill=(255, 220, 220))
+        print(f"[{bot.VERSION}] prime dashboard: {type(exc).__name__}: {exc}", flush=True)
+
+    # Montreal weather
+    y = 1025
     d.text((48, y), bot.rtl(f"هواشناسی {WEATHER_CITY}"), font=bot.font(28), fill=(235, 241, 247))
 
     try:
         w = _fetch_weather()
         days = w.get("days") or []
         current = w.get("current")
-        feels_like = w.get("feels_like")
+        feels = w.get("feels_like")
         today = days[0] if len(days) > 0 else None
         tomorrow = days[1] if len(days) > 1 else None
 
         if today:
             main = f"{current:.0f}°C" if current is not None else f"{today['high']:.0f}°C"
-            feels_text = f" | حس می‌شود {feels_like:.0f}°C" if feels_like is not None else ""
+            feels_text = f" | حسی {feels:.0f}°" if feels is not None else ""
             sub = f"امروز{feels_text} | بیشینه {today['high']:.0f}°  کمینه {today['low']:.0f}°"
         else:
             main, sub = "--", "داده امروز در دسترس نیست"
-        _draw_card(d, (48, 850, 510, 1000), "امروز", main, sub, (41, 182, 246))
+        _draw_card(d, (48, 1070, 510, 1220), "امروز", main, sub, (41, 182, 246))
 
         if tomorrow:
             main2 = f"{tomorrow['high']:.0f}° / {tomorrow['low']:.0f}°"
             sub2 = "فردا | بیشینه / کمینه"
         else:
             main2, sub2 = "--", "داده فردا در دسترس نیست"
-        _draw_card(d, (570, 850, 1032, 1000), "فردا", main2, sub2, (46, 204, 113))
+        _draw_card(d, (570, 1070, 1032, 1220), "فردا", main2, sub2, (46, 204, 113))
 
         alerts = w.get("alerts") or []
         if alerts:
@@ -198,18 +263,18 @@ def render_market_only(s):
                 alert_text = f"هشدار: {first['date']} کمینه {first['low']:.0f}°C"
             else:
                 alert_text = f"هشدار: {first['date']} افت {first['drop']:.0f}°C، کمینه {first['low']:.0f}°C"
-            d.rounded_rectangle((48, 1025, 1032, 1092), radius=16, fill=(56, 28, 28), outline=(239, 68, 68), width=2)
-            d.text((72, 1044), bot.rtl(alert_text), font=bot.font(21), fill=(255, 220, 220))
+            d.rounded_rectangle((48, 1240, 1032, 1292), radius=16, fill=(56, 28, 28), outline=(239, 68, 68), width=2)
+            d.text((72, 1253), bot.rtl(alert_text), font=bot.font(19), fill=(255, 220, 220))
         else:
             coldest = min(days, key=lambda x: x["low"]) if days else None
             cold_text = "10 روز آینده: هشدار سرمای شدید نداریم"
             if coldest:
                 cold_text += f" | کمترین {coldest['low']:.0f}°C در {coldest['date']}"
-            d.rounded_rectangle((48, 1025, 1032, 1092), radius=16, fill=(20, 42, 33), outline=(46, 204, 113), width=2)
-            d.text((72, 1044), bot.rtl(cold_text), font=bot.font(21), fill=(210, 246, 225))
+            d.rounded_rectangle((48, 1240, 1032, 1292), radius=16, fill=(20, 42, 33), outline=(46, 204, 113), width=2)
+            d.text((72, 1253), bot.rtl(cold_text), font=bot.font(19), fill=(210, 246, 225))
     except Exception as exc:
-        d.rounded_rectangle((48, 850, 1032, 1000), radius=18, fill=(36, 28, 28), outline=(239, 68, 68), width=2)
-        d.text((72, 900), bot.rtl("هواشناسی موقتاً در دسترس نیست"), font=bot.font(24), fill=(255, 220, 220))
+        d.rounded_rectangle((48, 1070, 1032, 1220), radius=18, fill=(36, 28, 28), outline=(239, 68, 68), width=2)
+        d.text((72, 1120), bot.rtl("هواشناسی موقتاً در دسترس نیست"), font=bot.font(24), fill=(255, 220, 220))
         print(f"[{bot.VERSION}] weather dashboard: {type(exc).__name__}: {exc}", flush=True)
 
     out = io.BytesIO()
@@ -231,7 +296,7 @@ def handle_message(m):
     if low in {"/start", "/help", "hello", "hi"}:
         bot.MAIN_KEYBOARD = MAIN_MENU
         bot.telegram_send_message(
-            "📊 Metra CEO Intelligence\nداده‌های بازار + هواشناسی Montréal، دمای حسی و هشدار سرمای 10 روزه",
+            "📊 Metra CEO Intelligence\nبازار + Prime Rate کانادا + هواشناسی Montréal",
             chat_id,
             True,
         )
@@ -245,10 +310,14 @@ def handle_message(m):
             _fetch_weather(force=True)
         except Exception:
             pass
+        try:
+            _fetch_prime(force=True)
+        except Exception:
+            pass
         bot.telegram_send_message(
-            "🔄 بازار و هواشناسی در حال به‌روزرسانی است."
+            "🔄 بازار، Prime Rate و هواشناسی در حال به‌روزرسانی است."
             if started
-            else "🔄 هواشناسی به‌روزرسانی شد؛ بازار از قبل در حال به‌روزرسانی است.",
+            else "🔄 Prime Rate و هواشناسی به‌روزرسانی شد؛ بازار از قبل در حال به‌روزرسانی است.",
             chat_id,
             True,
         )
@@ -277,7 +346,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                     "status": "ok",
                     "service": "metra-ceo-intelligence-agent",
                     "version": bot.VERSION,
-                    "mode": "focused-dashboard-markets-weather",
+                    "mode": "focused-dashboard-markets-prime-weather",
                     "weather_city": WEATHER_CITY,
                     "weather_cold_threshold_c": WEATHER_COLD_C,
                     "weather_drop_threshold_c": WEATHER_DROP_C,
