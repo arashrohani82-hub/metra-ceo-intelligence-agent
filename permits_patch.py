@@ -8,8 +8,11 @@ from PIL import Image, ImageDraw
 RESOURCE_ID = "5232a72d-235a-48eb-ae20-bb9d501300ad"
 API_URL = "https://www.donneesquebec.ca/recherche/api/3/action/datastore_search_sql"
 TTL = 6 * 60 * 60
+OIL_TTL = 15 * 60
 _cache = {"at": 0.0, "data": None}
 _lock = threading.Lock()
+_oil_cache = {"at": 0.0, "data": None}
+_oil_lock = threading.Lock()
 
 
 def _month_shift(dt, months):
@@ -88,6 +91,44 @@ def _pct(new, old):
     return (new / old - 1.0) * 100.0
 
 
+def _fetch_yahoo_future(bot, symbol):
+    encoded = symbol.replace("=", "%3D")
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{encoded}"
+    payload = bot.safe_get(url, params={"range": "2d", "interval": "5m"}, timeout=20).json()
+    chart = payload.get("chart") or {}
+    if chart.get("error"):
+        raise RuntimeError(str(chart.get("error")))
+    rows = chart.get("result") or []
+    if not rows:
+        raise RuntimeError(f"No Yahoo Finance data for {symbol}")
+    meta = rows[0].get("meta") or {}
+    price = meta.get("regularMarketPrice")
+    previous = meta.get("chartPreviousClose") or meta.get("previousClose")
+    if price is None:
+        raise RuntimeError(f"Price unavailable for {symbol}")
+    price = float(price)
+    previous = float(previous) if previous not in (None, 0) else None
+    change_pct = ((price / previous) - 1.0) * 100.0 if previous else None
+    return {"price": price, "change_pct": change_pct}
+
+
+def fetch_oil(bot, force=False):
+    now_ts = time.time()
+    with _oil_lock:
+        if not force and _oil_cache["data"] and now_ts - _oil_cache["at"] < OIL_TTL:
+            return _oil_cache["data"]
+
+    result = {
+        "brent": _fetch_yahoo_future(bot, "BZ=F"),
+        "wti": _fetch_yahoo_future(bot, "CL=F"),
+        "source": "Yahoo Finance",
+    }
+    with _oil_lock:
+        _oil_cache["at"] = now_ts
+        _oil_cache["data"] = result
+    return result
+
+
 def _weather_to_top(base):
     """Keep METRA header first and move Montreal weather directly below it."""
     w, h = base.size
@@ -108,14 +149,47 @@ def _weather_to_top(base):
     return out
 
 
+def _oil_change(v):
+    if v is None:
+        return "—"
+    arrow = "▲" if v > 0 else "▼" if v < 0 else "→"
+    return f"{arrow} {v:+.2f}%"
+
+
 def append_permits(bot, image_bytes):
     base = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     base = _weather_to_top(base)
     w, h = base.size
-    canvas = Image.new("RGB", (w, h + 350), (9, 15, 24))
+    canvas = Image.new("RGB", (w, h + 590), (9, 15, 24))
     canvas.paste(base, (0, 0))
     d = ImageDraw.Draw(canvas)
-    y = h + 18
+
+    # Oil section
+    oil_y = h + 18
+    d.text((48, oil_y), bot.rtl("قیمت جهانی نفت"), font=bot.font(32, True), fill=(235, 241, 247))
+    try:
+        oil = fetch_oil(bot)
+        brent = oil["brent"]
+        wti = oil["wti"]
+
+        d.rounded_rectangle((48, oil_y + 48, 510, oil_y + 200), radius=18, fill=(19, 26, 37), outline=(245, 158, 11), width=2)
+        d.text((72, oil_y + 66), "Brent", font=bot.font(24, True), fill=(225, 231, 239))
+        d.text((72, oil_y + 103), f"${brent['price']:.2f}", font=bot.font(46, True), fill=(248, 250, 252))
+        d.text((300, oil_y + 116), _oil_change(brent.get("change_pct")), font=bot.font(23, True), fill=(190, 200, 214))
+        d.text((72, oil_y + 165), bot.rtl("دلار / بشکه"), font=bot.font(20), fill=(145, 158, 171))
+
+        d.rounded_rectangle((570, oil_y + 48, 1032, oil_y + 200), radius=18, fill=(19, 26, 37), outline=(41, 182, 246), width=2)
+        d.text((594, oil_y + 66), "WTI", font=bot.font(24, True), fill=(225, 231, 239))
+        d.text((594, oil_y + 103), f"${wti['price']:.2f}", font=bot.font(46, True), fill=(248, 250, 252))
+        d.text((820, oil_y + 116), _oil_change(wti.get("change_pct")), font=bot.font(23, True), fill=(190, 200, 214))
+        d.text((594, oil_y + 165), bot.rtl("دلار / بشکه"), font=bot.font(20), fill=(145, 158, 171))
+    except Exception as exc:
+        d.rounded_rectangle((48, oil_y + 48, 1032, oil_y + 200), radius=18, fill=(36, 28, 28), outline=(239, 68, 68), width=2)
+        d.text((72, oil_y + 105), bot.rtl("قیمت نفت موقتاً در دسترس نیست"), font=bot.font(26, True), fill=(255, 220, 220))
+        print(f"[{bot.VERSION}] oil dashboard: {type(exc).__name__}: {exc}", flush=True)
+
+    # Permit section
+    y = oil_y + 232
     d.text((48, y), bot.rtl("پرمیت‌های ساختمانی Montréal"), font=bot.font(32, True), fill=(235, 241, 247))
 
     try:
