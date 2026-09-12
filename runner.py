@@ -6,7 +6,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-bot.VERSION = "CEO-BOT-V24-PRIME"
+bot.VERSION = "CEO-BOT-V25-RECEIVABLES"
 
 MAIN_MENU = {
     "keyboard": [
@@ -234,8 +234,12 @@ def _fetch_company_metrics(force=False):
             result["errors"].append(f"{key}:{type(exc).__name__}")
 
     result["annual_target"] = _env_money("METRA_ANNUAL_TARGET")
-    result["received_ytd"] = _env_money("METRA_RECEIVED_YTD")
-    result["payables_current"] = _env_money("METRA_PAYABLES_CURRENT")
+    # The bookkeeping service is the source of truth. Environment values are
+    # only backwards-compatible fallbacks and must never overwrite live totals.
+    if result.get("received_ytd") is None:
+        result["received_ytd"] = _env_money("METRA_RECEIVED_YTD")
+    if result.get("payables_current") is None:
+        result["payables_current"] = _env_money("METRA_PAYABLES_CURRENT")
 
     year = bot.datetime.now().year
     start = bot.datetime(year, 1, 1)
@@ -282,18 +286,18 @@ def _progress_bar(d, y, label, value, accent):
 def render_metra_dashboard(metrics):
     from PIL import Image, ImageDraw
 
-    canvas = Image.new("RGB", (1080, 1300), (7, 13, 21))
+    canvas = Image.new("RGB", (1080, 1390), (7, 13, 21))
     d = ImageDraw.Draw(canvas)
-    d.text((48, 34), "METRA", font=bot.font(44, True), fill=(242, 245, 247))
-    d.text((48, 84), "COMPANY CONTROL DASHBOARD", font=bot.font(21, True), fill=(46, 204, 113))
-    d.text((670, 54), metrics.get("updated_at") or bot.now_label(), font=bot.font(19), fill=(160, 174, 187))
+    d.text((48, 30), "METRA", font=bot.font(44, True), fill=(242, 245, 247))
+    d.text((48, 80), "COMPANY CONTROL DASHBOARD", font=bot.font(21, True), fill=(46, 204, 113))
+    d.text((670, 50), metrics.get("updated_at") or bot.now_label(), font=bot.font(19), fill=(160, 174, 187))
 
     def card(x1, y1, x2, y2, title, main, sub="", accent=(46, 204, 113)):
         d.rounded_rectangle((x1, y1, x2, y2), radius=20, fill=(15, 24, 34), outline=accent, width=2)
-        d.text((x1 + 20, y1 + 18), bot.rtl(title), font=bot.font(22, True), fill=(229, 235, 241))
-        d.text((x1 + 20, y1 + 57), main, font=bot.font(36, True), fill=(248, 250, 252))
+        d.text((x1 + 20, y1 + 14), bot.rtl(title), font=bot.font(21, True), fill=(229, 235, 241))
+        d.text((x1 + 20, y1 + 51), main, font=bot.font(34, True), fill=(248, 250, 252))
         if sub:
-            d.text((x1 + 20, y1 + 111), bot.rtl(sub), font=bot.font(17), fill=(145, 159, 172))
+            d.text((x1 + 20, y1 + 101), bot.rtl(sub), font=bot.font(16), fill=(145, 159, 172))
 
     offers = int(metrics.get("offers") or 0)
     accepted = int(metrics.get("accepted_projects") or 0)
@@ -301,38 +305,48 @@ def render_metra_dashboard(metrics):
     conversion = float(metrics.get("conversion_rate") or 0)
     quoted = float(metrics.get("quoted") or 0)
     contracted = float(metrics.get("contracted") or 0)
+    received = metrics.get("received_ytd")
+    expenses = float(metrics.get("company_expenses_ytd") or 0)
+    receivables = metrics.get("receivables")
+    net_cash = metrics.get("net_cash")
     target = metrics.get("annual_target")
     expected = metrics.get("expected_to_date")
     remaining = max(float(target) - contracted, 0.0) if target else None
     average_offer = quoted / offers if offers else None
     average_contract = contracted / accepted if accepted else None
 
-    card(48, 145, 516, 300, "آفرهای امسال", _money(quoted), f"{offers} آفر ارسال شده", (41, 182, 246))
-    card(564, 145, 1032, 300, "قراردادهای تبدیل‌شده", _money(contracted), f"{accepted} پروژه | نرخ تبدیل {conversion:.0%}", (46, 204, 113))
-    card(48, 325, 516, 480, "هزینه‌های ثبت‌شده", _money(metrics.get("company_expenses_ytd")), f"{int(metrics.get('company_expense_transactions_ytd') or 0)} تراکنش شرکت", (245, 158, 11))
-    card(564, 325, 1032, 480, "پایپ‌لاین فعال", str(pipeline), f"{int(metrics.get('on_hold') or 0)} در انتظار", (139, 92, 246))
-    card(48, 505, 516, 660, "تارگت سالانه", _money(target), "هدف فروش سال ۲۰۲۶", (41, 182, 246))
-    card(564, 505, 1032, 660, "مانده تا تارگت", _money(remaining), "بر اساس قراردادهای تبدیل‌شده", (239, 68, 68) if remaining else (46, 204, 113))
-    card(48, 685, 516, 840, "تارگت مورد انتظار تا امروز", _money(expected), "متناسب با زمان سپری‌شده", (41, 182, 246))
+    card(48, 130, 516, 265, "آفرهای امسال", _money(quoted), f"{offers} آفر ارسال شده", (41, 182, 246))
+    card(564, 130, 1032, 265, "قراردادهای تبدیل‌شده", _money(contracted), f"{accepted} پروژه | نرخ تبدیل {conversion:.0%}", (46, 204, 113))
+
+    card(48, 285, 516, 420, "دریافتی قطعی ۲۰۲۶", _money(received), f"{int(metrics.get('received_statement_count_ytd') or 0)} گزارش بانکی نهایی", (46, 204, 113))
+    card(564, 285, 1032, 420, "هزینه‌های ثبت‌شده", _money(expenses), f"{int(metrics.get('company_expense_transactions_ytd') or 0)} تراکنش شرکت", (245, 158, 11))
+
+    card(48, 440, 516, 575, "مطالبات برآوردی", _money(receivables), "قراردادها منهای دریافتی قطعی", (139, 92, 246))
+    card(564, 440, 1032, 575, "خالص نقدی ثبت‌شده", _money(net_cash), "دریافتی منهای هزینه ثبت‌شده", (46, 204, 113) if net_cash is not None and net_cash >= 0 else (239, 68, 68))
+
+    card(48, 595, 516, 730, "پایپ‌لاین فعال", str(pipeline), f"{int(metrics.get('on_hold') or 0)} در انتظار", (139, 92, 246))
+    card(564, 595, 1032, 730, "تارگت سالانه", _money(target), "هدف فروش سال ۲۰۲۶", (41, 182, 246))
+
+    card(48, 750, 516, 885, "مانده تا تارگت", _money(remaining), "بر اساس قراردادهای تبدیل‌شده", (239, 68, 68) if remaining else (46, 204, 113))
     variance = metrics.get("schedule_variance")
     variance_color = (46, 204, 113) if variance is not None and variance >= 0 else (239, 68, 68)
-    card(564, 685, 1032, 840, "واریانس زمانی", _money(variance), "عملکرد منهای تارگت امروز", variance_color)
+    card(564, 750, 1032, 885, "واریانس زمانی", _money(variance), "عملکرد فروش منهای تارگت امروز", variance_color)
 
-    d.text((48, 885), bot.rtl("پیشرفت سال و تارگت"), font=bot.font(29, True), fill=(240, 244, 248))
-    _progress_bar(d, 935, "زمان سپری‌شده از سال", metrics.get("time_progress"), (41, 182, 246))
-    _progress_bar(d, 1040, "پیشرفت تارگت فروش", metrics.get("target_progress"), (46, 204, 113))
+    d.text((48, 920), bot.rtl("پیشرفت سال و تارگت فروش"), font=bot.font(27, True), fill=(240, 244, 248))
+    _progress_bar(d, 965, "زمان سپری‌شده از سال", metrics.get("time_progress"), (41, 182, 246))
+    _progress_bar(d, 1065, "پیشرفت تارگت فروش", metrics.get("target_progress"), (46, 204, 113))
 
-    d.rounded_rectangle((48, 1150, 1032, 1245), radius=18, fill=(18, 29, 39), outline=(69, 84, 99), width=2)
-    summary = f"میانگین آفر: {_money(average_offer)}    |    میانگین قرارداد: {_money(average_contract)}"
-    d.text((72, 1182), bot.rtl(summary), font=bot.font(21, True), fill=(220, 228, 235))
+    d.rounded_rectangle((48, 1175, 1032, 1305), radius=18, fill=(18, 29, 39), outline=(69, 84, 99), width=2)
+    summary1 = f"تارگت تا امروز: {_money(expected)}    |    خالص نقدی: {_money(net_cash)}"
+    summary2 = f"میانگین آفر: {_money(average_offer)}    |    میانگین قرارداد: {_money(average_contract)}"
+    d.text((72, 1200), bot.rtl(summary1), font=bot.font(20, True), fill=(220, 228, 235))
+    d.text((72, 1253), bot.rtl(summary2), font=bot.font(19), fill=(175, 188, 200))
     if metrics.get("errors"):
-        d.text((48, 1264), "Data: " + ", ".join(metrics["errors"]), font=bot.font(14), fill=(255, 170, 70))
+        d.text((48, 1332), "Data: " + ", ".join(metrics["errors"]), font=bot.font(14), fill=(255, 170, 70))
 
     out = io.BytesIO()
     canvas.save(out, format="PNG", optimize=True)
     return out.getvalue()
-
-
 def show_metra_dashboard(chat_id, force=False):
     metrics = _fetch_company_metrics(force=force)
     bot.telegram_send_photo(
@@ -468,6 +482,10 @@ def handle_message(m):
             pass
         try:
             _fetch_prime(force=True)
+        except Exception:
+            pass
+        try:
+            _fetch_company_metrics(force=True)
         except Exception:
             pass
         bot.telegram_send_message(
