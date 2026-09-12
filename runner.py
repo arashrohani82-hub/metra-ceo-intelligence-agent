@@ -6,7 +6,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-bot.VERSION = "CEO-BOT-V22-WEATHER"
+bot.VERSION = "CEO-BOT-V23-MONTREAL-WEATHER"
 
 MAIN_MENU = {
     "keyboard": [
@@ -21,9 +21,10 @@ MAIN_MENU = {
 
 bot.MAIN_KEYBOARD = MAIN_MENU
 
-WEATHER_LAT = float(os.environ.get("WEATHER_LAT", "45.6066"))
-WEATHER_LON = float(os.environ.get("WEATHER_LON", "-73.7124"))
-WEATHER_CITY = os.environ.get("WEATHER_CITY", "Laval")
+# Montreal is the fixed reference for the CEO weather dashboard.
+WEATHER_LAT = 45.508822
+WEATHER_LON = -73.554077
+WEATHER_CITY = "Montréal"
 WEATHER_COLD_C = float(os.environ.get("WEATHER_COLD_C", "-15"))
 WEATHER_DROP_C = float(os.environ.get("WEATHER_DROP_C", "10"))
 WEATHER_TTL = 30 * 60
@@ -52,7 +53,7 @@ def _fetch_weather(force=False):
         "longitude": WEATHER_LON,
         "timezone": "America/Toronto",
         "forecast_days": 10,
-        "current": "temperature_2m",
+        "current": "temperature_2m,apparent_temperature",
         "daily": "temperature_2m_max,temperature_2m_min",
     }
     data = bot.safe_get("https://api.open-meteo.com/v1/forecast", params=params, timeout=20).json()
@@ -86,10 +87,13 @@ def _fetch_weather(force=False):
                     "text": f"افت شدید دما: {drop:.0f}°C نسبت به روز قبل",
                 })
 
-    current_value = (data.get("current") or {}).get("temperature_2m")
+    current_data = data.get("current") or {}
+    current_value = current_data.get("temperature_2m")
+    feels_value = current_data.get("apparent_temperature")
     result = {
         "city": WEATHER_CITY,
         "current": float(current_value) if current_value is not None else None,
+        "feels_like": float(feels_value) if feels_value is not None else None,
         "days": days,
         "alerts": alerts,
     }
@@ -168,12 +172,14 @@ def render_market_only(s):
         w = _fetch_weather()
         days = w.get("days") or []
         current = w.get("current")
+        feels_like = w.get("feels_like")
         today = days[0] if len(days) > 0 else None
         tomorrow = days[1] if len(days) > 1 else None
 
         if today:
             main = f"{current:.0f}°C" if current is not None else f"{today['high']:.0f}°C"
-            sub = f"امروز | بیشینه {today['high']:.0f}°  کمینه {today['low']:.0f}°"
+            feels_text = f" | حس می‌شود {feels_like:.0f}°C" if feels_like is not None else ""
+            sub = f"امروز{feels_text} | بیشینه {today['high']:.0f}°  کمینه {today['low']:.0f}°"
         else:
             main, sub = "--", "داده امروز در دسترس نیست"
         _draw_card(d, (48, 850, 510, 1000), "امروز", main, sub, (41, 182, 246))
@@ -225,7 +231,7 @@ def handle_message(m):
     if low in {"/start", "/help", "hello", "hi"}:
         bot.MAIN_KEYBOARD = MAIN_MENU
         bot.telegram_send_message(
-            "📊 Metra CEO Intelligence\nداده‌های بازار + هواشناسی امروز، فردا و هشدار سرمای 10 روزه",
+            "📊 Metra CEO Intelligence\nداده‌های بازار + هواشناسی Montréal، دمای حسی و هشدار سرمای 10 روزه",
             chat_id,
             True,
         )
