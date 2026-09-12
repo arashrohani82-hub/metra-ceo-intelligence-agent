@@ -10,7 +10,8 @@ bot.VERSION = "CEO-BOT-V24-PRIME"
 
 MAIN_MENU = {
     "keyboard": [
-        [{"text": "📊 داشبورد"}],
+        [{"text": "📊 داشبورد عمومی"}],
+        [{"text": "🏢 داشبورد مترا"}],
         [{"text": "🔄 بررسی مجدد"}],
     ],
     "resize_keyboard": True,
@@ -35,6 +36,9 @@ _WEATHER_LOCK = threading.Lock()
 _PRIME_CACHE = {"at": 0.0, "data": None}
 _PRIME_LOCK = threading.Lock()
 _ALERTED_KEYS = set()
+_COMPANY_CACHE = {"at": 0.0, "data": None}
+_COMPANY_LOCK = threading.Lock()
+COMPANY_TTL = 5 * 60
 
 
 def no_flight_refresh(notify=None, force=False):
@@ -188,6 +192,155 @@ def _draw_card(d, xy, title, main, sub, accent=(46, 204, 113)):
     d.text((x1 + 24, y1 + 104), bot.rtl(sub), font=bot.font(18), fill=(145, 158, 171))
 
 
+
+def _env_money(name):
+    raw = os.environ.get(name, "").strip().replace("$", "").replace(",", "")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _fetch_company_metrics(force=False):
+    now = time.time()
+    with _COMPANY_LOCK:
+        if not force and _COMPANY_CACHE["data"] and now - _COMPANY_CACHE["at"] < COMPANY_TTL:
+            return dict(_COMPANY_CACHE["data"])
+
+    secret = os.environ.get("ROUTER_SHARED_SECRET", "").strip()
+    sources = (
+        ("ods", os.environ.get("ODS_SERVICE_URL", "").strip()),
+        ("bookkeeping", os.environ.get("BOOKKEEPING_SERVICE_URL", "").strip()),
+    )
+    result = {"errors": []}
+    for key, base_url in sources:
+        if not base_url or not secret:
+            result["errors"].append(f"{key}:not_configured")
+            continue
+        try:
+            response = bot.requests.get(
+                f"{base_url.rstrip('/')}/router/company-metrics",
+                headers={"X-Router-Secret": secret},
+                timeout=35,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                raise RuntimeError(payload.get("error") or "invalid response")
+            result.update(payload)
+        except Exception as exc:
+            result["errors"].append(f"{key}:{type(exc).__name__}")
+
+    result["annual_target"] = _env_money("METRA_ANNUAL_TARGET")
+    result["received_ytd"] = _env_money("METRA_RECEIVED_YTD")
+    result["payables_current"] = _env_money("METRA_PAYABLES_CURRENT")
+
+    year = bot.datetime.now().year
+    start = bot.datetime(year, 1, 1)
+    end = bot.datetime(year + 1, 1, 1)
+    elapsed = max(0.0, min(1.0, (bot.datetime.now() - start).total_seconds() / (end - start).total_seconds()))
+    result["time_progress"] = elapsed
+
+    contracted = result.get("contracted")
+    received = result.get("received_ytd")
+    expenses = result.get("company_expenses_ytd")
+    target = result.get("annual_target")
+    result["receivables"] = max(float(contracted) - float(received), 0.0) if contracted is not None and received is not None else None
+    result["net_cash"] = float(received) - float(expenses or 0) if received is not None else None
+    result["target_progress"] = float(contracted) / target if contracted is not None and target else None
+    result["expected_to_date"] = target * elapsed if target else None
+    result["schedule_variance"] = float(contracted) - result["expected_to_date"] if contracted is not None and target else None
+    result["updated_at"] = bot.now_label()
+
+    with _COMPANY_LOCK:
+        _COMPANY_CACHE["at"] = now
+        _COMPANY_CACHE["data"] = dict(result)
+    return result
+
+
+def _money(value):
+    if value is None:
+        return "—"
+    try:
+        return "$" + f"{float(value):,.0f}"
+    except Exception:
+        return "—"
+
+
+def _progress_bar(d, y, label, value, accent):
+    value = max(0.0, float(value or 0))
+    shown = min(value, 1.0)
+    d.text((48, y), bot.rtl(label), font=bot.font(23), fill=(225, 231, 239))
+    d.text((920, y), f"{value:.0%}", font=bot.font(23, True), fill=accent)
+    d.rounded_rectangle((48, y + 43, 1032, y + 76), radius=16, fill=(31, 42, 54))
+    if shown > 0:
+        d.rounded_rectangle((48, y + 43, 48 + int(984 * shown), y + 76), radius=16, fill=accent)
+
+
+def render_metra_dashboard(metrics):
+    from PIL import Image, ImageDraw
+
+    canvas = Image.new("RGB", (1080, 1300), (7, 13, 21))
+    d = ImageDraw.Draw(canvas)
+    d.text((48, 34), "METRA", font=bot.font(44, True), fill=(242, 245, 247))
+    d.text((48, 84), "COMPANY CONTROL DASHBOARD", font=bot.font(21, True), fill=(46, 204, 113))
+    d.text((670, 54), metrics.get("updated_at") or bot.now_label(), font=bot.font(19), fill=(160, 174, 187))
+
+    def card(x1, y1, x2, y2, title, main, sub="", accent=(46, 204, 113)):
+        d.rounded_rectangle((x1, y1, x2, y2), radius=20, fill=(15, 24, 34), outline=accent, width=2)
+        d.text((x1 + 20, y1 + 18), bot.rtl(title), font=bot.font(22, True), fill=(229, 235, 241))
+        d.text((x1 + 20, y1 + 57), main, font=bot.font(36, True), fill=(248, 250, 252))
+        if sub:
+            d.text((x1 + 20, y1 + 111), bot.rtl(sub), font=bot.font(17), fill=(145, 159, 172))
+
+    offers = int(metrics.get("offers") or 0)
+    accepted = int(metrics.get("accepted_projects") or 0)
+    conversion = float(metrics.get("conversion_rate") or 0)
+    card(48, 145, 516, 300, "آفرهای امسال", _money(metrics.get("quoted")), f"{offers} آفر ارسال شده", (41, 182, 246))
+    card(564, 145, 1032, 300, "قراردادهای تبدیل‌شده", _money(metrics.get("contracted")), f"{accepted} پروژه | نرخ تبدیل {conversion:.0%}", (46, 204, 113))
+    card(48, 325, 516, 480, "دریافتی امسال", _money(metrics.get("received_ytd")), "مبلغ وصول‌شده", (46, 204, 113))
+    card(564, 325, 1032, 480, "هزینه‌های شرکت", _money(metrics.get("company_expenses_ytd")), f"{int(metrics.get('company_expense_transactions_ytd') or 0)} تراکنش ثبت‌شده", (245, 158, 11))
+    card(48, 505, 516, 660, "مطالبات", _money(metrics.get("receivables")), "قراردادها منهای دریافتی", (139, 92, 246))
+    card(564, 505, 1032, 660, "بدهی‌های جاری", _money(metrics.get("payables_current")), "تعهدات پرداخت‌نشده", (239, 68, 68))
+    card(48, 685, 516, 840, "تارگت سالانه", _money(metrics.get("annual_target")), "هدف فروش قراردادها", (41, 182, 246))
+    variance = metrics.get("schedule_variance")
+    variance_color = (46, 204, 113) if variance is not None and variance >= 0 else (239, 68, 68)
+    card(564, 685, 1032, 840, "واریانس تا امروز", _money(variance), "نسبت به تارگت زمانی", variance_color)
+
+    d.text((48, 885), bot.rtl("پیشرفت سال و تارگت"), font=bot.font(29, True), fill=(240, 244, 248))
+    _progress_bar(d, 935, "زمان سپری‌شده از سال", metrics.get("time_progress"), (41, 182, 246))
+    _progress_bar(d, 1040, "پیشرفت تارگت فروش", metrics.get("target_progress"), (46, 204, 113))
+
+    expected = metrics.get("expected_to_date")
+    net_cash = metrics.get("net_cash")
+    d.rounded_rectangle((48, 1150, 1032, 1245), radius=18, fill=(18, 29, 39), outline=(69, 84, 99), width=2)
+    summary = f"تارگت تا امروز: {_money(expected)}    |    جریان نقدی خالص: {_money(net_cash)}"
+    d.text((72, 1182), bot.rtl(summary), font=bot.font(21, True), fill=(220, 228, 235))
+    if metrics.get("errors"):
+        d.text((48, 1264), "Data: " + ", ".join(metrics["errors"]), font=bot.font(14), fill=(255, 170, 70))
+
+    out = io.BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def show_metra_dashboard(chat_id, force=False):
+    metrics = _fetch_company_metrics(force=force)
+    missing = []
+    if metrics.get("annual_target") is None:
+        missing.append("تارگت")
+    if metrics.get("received_ytd") is None:
+        missing.append("دریافتی")
+    if metrics.get("payables_current") is None:
+        missing.append("بدهی")
+    caption = "🏢 داشبورد مدیریتی مترا"
+    if missing:
+        caption += "\n⚙️ نیازمند تنظیم: " + "، ".join(missing)
+    bot.telegram_send_photo(render_metra_dashboard(metrics), caption, chat_id)
+
+
 def render_market_only(s):
     from PIL import Image, ImageDraw
 
@@ -295,13 +448,16 @@ def handle_message(m):
     if low in {"/start", "/help", "hello", "hi"}:
         bot.MAIN_KEYBOARD = MAIN_MENU
         bot.telegram_send_message(
-            "📊 Metra CEO Intelligence\nبازار + Prime Rate کانادا + هواشناسی Montréal",
+            "📊 Metra CEO Intelligence\nداشبورد عمومی + داشبورد مدیریتی مترا",
             chat_id,
             True,
         )
-    elif raw in {"📊 داشبورد", "💰 ارز و طلا"} or low == "/dashboard":
+    elif raw in {"📊 داشبورد", "📊 داشبورد عمومی", "💰 ارز و طلا"} or low == "/dashboard":
         bot.MAIN_KEYBOARD = MAIN_MENU
         bot.show_dashboard(chat_id)
+    elif raw == "🏢 داشبورد مترا" or low == "/metra":
+        bot.MAIN_KEYBOARD = MAIN_MENU
+        show_metra_dashboard(chat_id)
     elif raw == "🔄 بررسی مجدد" or low == "/refresh":
         bot.MAIN_KEYBOARD = MAIN_MENU
         started = bot.start_market_refresh(chat_id, force=True)
