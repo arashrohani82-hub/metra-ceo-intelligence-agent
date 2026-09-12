@@ -319,7 +319,11 @@ def render_metra_dashboard(metrics):
     card(564, 130, 1032, 265, "قراردادهای تبدیل‌شده", _money(contracted), f"{accepted} پروژه | نرخ تبدیل {conversion:.0%}", (46, 204, 113))
 
     card(48, 285, 516, 420, "دریافتی قطعی ۲۰۲۶", _money(received), f"{int(metrics.get('received_statement_count_ytd') or 0)} گزارش بانکی نهایی", (46, 204, 113))
-    card(564, 285, 1032, 420, "هزینه‌های ثبت‌شده", _money(expenses), f"{int(metrics.get('company_expense_transactions_ytd') or 0)} تراکنش شرکت", (245, 158, 11))
+    expense_sources = (
+        f"{int(metrics.get('receipt_expense_transactions_ytd') or 0)} رسید"
+        f" + {int(metrics.get('bank_expense_transactions_ytd') or 0)} برداشت بانکی جدید"
+    )
+    card(564, 285, 1032, 420, "هزینه‌های قطعی بدون تکرار", _money(expenses), expense_sources, (245, 158, 11))
 
     card(48, 440, 516, 575, "مطالبات برآوردی", _money(receivables), "قراردادها منهای دریافتی قطعی", (139, 92, 246))
     card(564, 440, 1032, 575, "خالص نقدی ثبت‌شده", _money(net_cash), "دریافتی منهای هزینه ثبت‌شده", (46, 204, 113) if net_cash is not None and net_cash >= 0 else (239, 68, 68))
