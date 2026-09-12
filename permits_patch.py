@@ -100,17 +100,44 @@ def _pct(new, old):
     return (new / old - 1.0) * 100.0
 
 
+def _weather_to_top(base):
+    """Keep the METRA header first, then move the Montreal weather block directly below it."""
+    w, h = base.size
+    if w != 1080 or h < 1290:
+        return base
+
+    # runner layout: header/market 0..790, prime 790..1015, weather 1015..1300.
+    header = base.crop((0, 0, w, 130))
+    weather = base.crop((0, 1015, w, min(1300, h)))
+    market = base.crop((0, 130, w, 790))
+    prime = base.crop((0, 790, w, 1015))
+    remainder = base.crop((0, 1300, w, h)) if h > 1300 else None
+
+    parts = [header, weather, market, prime]
+    if remainder and remainder.height:
+        parts.append(remainder)
+    out_h = sum(part.height for part in parts)
+    out = Image.new("RGB", (w, out_h), (9, 15, 24))
+    y = 0
+    for part in parts:
+        out.paste(part, (0, y))
+        y += part.height
+    return out
+
+
 def append_permits(bot, image_bytes):
-    """Append a compact Montreal permit market section to an existing dashboard PNG."""
+    """Reorder the dashboard for mobile readability and append Montreal permit analytics."""
     from PIL import Image, ImageDraw
 
+    global Image
     base = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    base = _weather_to_top(base)
     w, h = base.size
-    canvas = Image.new("RGB", (w, h + 330), (9, 15, 24))
+    canvas = Image.new("RGB", (w, h + 350), (9, 15, 24))
     canvas.paste(base, (0, 0))
     d = ImageDraw.Draw(canvas)
-    y = h + 20
-    d.text((48, y), bot.rtl("پرمیت‌های ساختمانی Montréal"), font=bot.font(28), fill=(235, 241, 247))
+    y = h + 18
+    d.text((48, y), bot.rtl("پرمیت‌های ساختمانی Montréal"), font=bot.font(32, True), fill=(235, 241, 247))
 
     try:
         p = fetch_permits(bot)
@@ -122,39 +149,40 @@ def append_permits(bot, image_bytes):
         yoy_pct = _pct(last["total"], yoy["total"])
 
         d.rounded_rectangle(
-            (48, y + 45, 1032, y + 185), radius=18,
+            (48, y + 48, 1032, y + 210), radius=18,
             fill=(19, 26, 37), outline=(99, 102, 241), width=2,
         )
-        d.text((72, y + 65), bot.rtl(f"آخرین ماه کامل: {last['month']}"), font=bot.font(21), fill=(190, 200, 214))
-        d.text((72, y + 98), f"{last['total']:,}", font=bot.font(38), fill=(248, 250, 252))
-        d.text((245, y + 105), bot.rtl("پرمیت صادرشده"), font=bot.font(21), fill=(225, 231, 239))
+        d.text((72, y + 65), bot.rtl(f"آخرین ماه کامل: {last['month']}"), font=bot.font(24, True), fill=(190, 200, 214))
+        d.text((72, y + 100), f"{last['total']:,}", font=bot.font(46, True), fill=(248, 250, 252))
+        d.text((245, y + 111), bot.rtl("پرمیت صادرشده"), font=bot.font(25, True), fill=(225, 231, 239))
 
         mom_text = "—" if mom is None else f"{mom:+.1f}%"
         yoy_text = "—" if yoy_pct is None else f"{yoy_pct:+.1f}%"
-        breakdown = f"CO {last['CO']:,}  |  TR {last['TR']:,}  |  DE {last['DE']:,}  |  CA {last['CA']:,}"
-        d.text((72, y + 150), breakdown, font=bot.font(18), fill=(145, 158, 171))
-        d.text((650, y + 105), f"MoM {mom_text}   YoY {yoy_text}", font=bot.font(20), fill=(190, 200, 214))
+        d.text((650, y + 106), f"MoM {mom_text}   YoY {yoy_text}", font=bot.font(24, True), fill=(220, 228, 238))
+
+        breakdown = f"CO {last['CO']:,}   TR {last['TR']:,}   DE {last['DE']:,}   CA {last['CA']:,}"
+        d.text((72, y + 168), breakdown, font=bot.font(23, True), fill=(175, 190, 205))
 
         current_text = f"ماه جاری {current['month']}: {current['total']:,} تا امروز"
-        d.text((72, y + 205), bot.rtl(current_text), font=bot.font(20), fill=(225, 231, 239))
+        d.text((72, y + 228), bot.rtl(current_text), font=bot.font(24, True), fill=(235, 241, 247))
 
         if last["top"]:
             top_text = " | ".join(f"{name}: {count:,}" for name, count in last["top"])
-            d.text((72, y + 240), bot.rtl("Top arrondissements: " + top_text), font=bot.font(17), fill=(145, 158, 171))
+            d.text((72, y + 270), bot.rtl("Top arrondissements: " + top_text), font=bot.font(20), fill=(165, 180, 195))
 
         d.text(
-            (72, y + 278),
+            (72, y + 312),
             bot.rtl("منبع: Ville de Montréal / Données Québec • به‌روزرسانی هفتگی"),
-            font=bot.font(16), fill=(112, 125, 139),
+            font=bot.font(18), fill=(125, 140, 155),
         )
     except Exception as exc:
         d.rounded_rectangle(
-            (48, y + 45, 1032, y + 185), radius=18,
+            (48, y + 48, 1032, y + 210), radius=18,
             fill=(36, 28, 28), outline=(239, 68, 68), width=2,
         )
         d.text(
-            (72, y + 95), bot.rtl("داده پرمیت‌های Montréal موقتاً در دسترس نیست"),
-            font=bot.font(23), fill=(255, 220, 220),
+            (72, y + 105), bot.rtl("داده پرمیت‌های Montréal موقتاً در دسترس نیست"),
+            font=bot.font(26, True), fill=(255, 220, 220),
         )
         print(f"[{bot.VERSION}] permits dashboard: {type(exc).__name__}: {exc}", flush=True)
 
