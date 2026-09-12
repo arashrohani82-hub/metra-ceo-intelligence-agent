@@ -12,6 +12,8 @@ MAIN_MENU = {
     "keyboard": [
         [{"text": "📊 داشبورد عمومی"}],
         [{"text": "🏢 داشبورد مترا"}],
+        [{"text": "📈 روند مترا"}, {"text": "📈 روند بازار"}],
+        [{"text": "🔎 جزئیات مالی مترا"}],
         [{"text": "🔄 بررسی مجدد"}],
     ],
     "resize_keyboard": True,
@@ -351,6 +353,171 @@ def render_metra_dashboard(metrics):
     out = io.BytesIO()
     canvas.save(out, format="PNG", optimize=True)
     return out.getvalue()
+def _line_panel(d, box, title, labels, series):
+    x1, y1, x2, y2 = box
+    d.rounded_rectangle(box, radius=20, fill=(15, 24, 34), outline=(58, 73, 89), width=2)
+    d.text((x1 + 22, y1 + 16), bot.rtl(title), font=bot.font(23, True), fill=(236, 241, 246))
+    px1, py1, px2, py2 = x1 + 72, y1 + 70, x2 - 28, y2 - 62
+    all_values = [float(v) for _, values, _ in series for v in values if v is not None]
+    lo = min(all_values) if all_values else 0.0
+    hi = max(all_values) if all_values else 1.0
+    if hi <= lo:
+        hi = lo + 1.0
+    pad = (hi - lo) * 0.08
+    lo = max(0.0, lo - pad)
+    hi += pad
+    for step in range(5):
+        y = py1 + int((py2 - py1) * step / 4)
+        d.line((px1, y, px2, y), fill=(38, 51, 65), width=1)
+        value = hi - (hi - lo) * step / 4
+        d.text((x1 + 8, y - 10), f"{value/1000:.0f}k" if abs(value) >= 1000 else f"{value:.0f}", font=bot.font(14), fill=(130, 145, 159))
+    count = max(len(labels), 1)
+    for name, values, color in series:
+        points = []
+        for i, value in enumerate(values):
+            if value is None:
+                continue
+            x = px1 if count == 1 else px1 + int((px2 - px1) * i / (count - 1))
+            y = py2 - int((float(value) - lo) / (hi - lo) * (py2 - py1))
+            points.append((x, y))
+        if len(points) > 1:
+            d.line(points, fill=color, width=5, joint="curve")
+        for point in points:
+            d.ellipse((point[0] - 4, point[1] - 4, point[0] + 4, point[1] + 4), fill=color)
+    tick_indexes = sorted(set([0, max(0, count // 4), max(0, count // 2), max(0, count * 3 // 4), count - 1]))
+    for i in tick_indexes:
+        if i >= len(labels):
+            continue
+        x = px1 if count == 1 else px1 + int((px2 - px1) * i / (count - 1))
+        d.text((x - 20, py2 + 14), labels[i], font=bot.font(14), fill=(139, 153, 166))
+    legend_x = x1 + 24
+    for name, _, color in series:
+        d.line((legend_x, y2 - 27, legend_x + 28, y2 - 27), fill=color, width=5)
+        d.text((legend_x + 36, y2 - 39), bot.rtl(name), font=bot.font(16), fill=(197, 207, 217))
+        legend_x += 190
+
+
+def render_company_trends(metrics):
+    from PIL import Image, ImageDraw
+
+    canvas = Image.new("RGB", (1080, 1250), (7, 13, 21))
+    d = ImageDraw.Draw(canvas)
+    d.text((48, 30), "METRA", font=bot.font(44, True), fill=(242, 245, 247))
+    d.text((48, 80), "MONTHLY TREND DRILL-DOWN", font=bot.font(21, True), fill=(46, 204, 113))
+    d.text((680, 50), metrics.get("updated_at") or bot.now_label(), font=bot.font(18), fill=(160, 174, 187))
+
+    sales = metrics.get("sales_monthly") or []
+    cash = metrics.get("cashflow_monthly") or []
+    month_labels = ["ژان", "فور", "مار", "آور", "مه", "ژوئن", "ژوئی", "اوت", "سپت", "اکت", "نوام", "دسام"]
+    sales_map = {row.get("month"): row for row in sales}
+    cash_map = {row.get("month"): row for row in cash}
+    year = bot.datetime.now().year
+    keys = [f"{year}-{month:02d}" for month in range(1, 13)]
+
+    quoted = [float((sales_map.get(key) or {}).get("quoted") or 0) for key in keys]
+    contracted = [float((sales_map.get(key) or {}).get("contracted") or 0) for key in keys]
+    received = [float((cash_map.get(key) or {}).get("received") or 0) for key in keys]
+    expenses = [float((cash_map.get(key) or {}).get("expenses") or 0) for key in keys]
+
+    _line_panel(
+        d, (48, 135, 1032, 625), "روند ماهانه فروش",
+        month_labels,
+        [
+            ("مبلغ آفرها", quoted, (41, 182, 246)),
+            ("قراردادهای تبدیل‌شده", contracted, (46, 204, 113)),
+        ],
+    )
+    _line_panel(
+        d, (48, 655, 1032, 1145), "روند ماهانه جریان نقدی",
+        month_labels,
+        [
+            ("دریافتی قطعی", received, (46, 204, 113)),
+            ("هزینه قطعی", expenses, (245, 158, 11)),
+        ],
+    )
+    d.text((48, 1185), bot.rtl("منبع: ربات ODS و گزارش‌های بانکی نهایی‌شده"), font=bot.font(18), fill=(130, 144, 157))
+    out = io.BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def _yahoo_month(symbol):
+    response = bot.safe_get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        params={"range": "1mo", "interval": "1d"},
+        timeout=25,
+    ).json()
+    result = (((response.get("chart") or {}).get("result") or [None])[0] or {})
+    timestamps = result.get("timestamp") or []
+    closes = (((result.get("indicators") or {}).get("quote") or [{}])[0].get("close") or [])
+    rows = []
+    for stamp, close in zip(timestamps, closes):
+        if close is not None:
+            rows.append((bot.datetime.fromtimestamp(stamp).strftime("%m-%d"), float(close)))
+    if len(rows) < 2:
+        raise RuntimeError(f"No trend data for {symbol}")
+    return rows
+
+
+def render_market_trends():
+    from PIL import Image, ImageDraw
+
+    canvas = Image.new("RGB", (1080, 1320), (7, 13, 21))
+    d = ImageDraw.Draw(canvas)
+    d.text((48, 30), "METRA", font=bot.font(44, True), fill=(242, 245, 247))
+    d.text((48, 80), "30-DAY MARKET TRENDS", font=bot.font(21, True), fill=(46, 204, 113))
+    specs = [
+        ("طلای جهانی", "GC=F", (232, 170, 32)),
+        ("USD / CAD", "CAD=X", (46, 204, 113)),
+        ("نفت Brent", "BZ=F", (245, 158, 11)),
+        ("نفت WTI", "CL=F", (41, 182, 246)),
+    ]
+    boxes = [(48, 135, 516, 650), (564, 135, 1032, 650), (48, 680, 516, 1195), (564, 680, 1032, 1195)]
+    for (title, symbol, color), box in zip(specs, boxes):
+        try:
+            rows = _yahoo_month(symbol)
+            labels = [row[0] for row in rows]
+            values = [row[1] for row in rows]
+            _line_panel(d, box, title, labels, [(title, values, color)])
+        except Exception as exc:
+            d.rounded_rectangle(box, radius=20, fill=(36, 28, 28), outline=(239, 68, 68), width=2)
+            d.text((box[0] + 24, box[1] + 30), bot.rtl(title), font=bot.font(23, True), fill=(245, 230, 230))
+            d.text((box[0] + 24, box[1] + 90), bot.rtl("داده روند موقتاً در دسترس نیست"), font=bot.font(17), fill=(255, 170, 170))
+            print(f"[{bot.VERSION}] trend {symbol}: {type(exc).__name__}: {exc}", flush=True)
+    d.text((48, 1240), bot.rtl("بازه: ۳۰ روز اخیر • داده روزانه بازار"), font=bot.font(18), fill=(130, 144, 157))
+    out = io.BytesIO()
+    canvas.save(out, format="PNG", optimize=True)
+    return out.getvalue()
+
+
+def company_financial_details(metrics):
+    sales = {row.get("month"): row for row in (metrics.get("sales_monthly") or [])}
+    cash = {row.get("month"): row for row in (metrics.get("cashflow_monthly") or [])}
+    keys = sorted(set(sales) | set(cash))
+    lines = ["🔎 جزئیات ماهانه مترا", ""]
+    for key in keys:
+        s = sales.get(key) or {}
+        f = cash.get(key) or {}
+        if not any(float(s.get(name) or 0) for name in ("quoted", "contracted")) and not any(float(f.get(name) or 0) for name in ("received", "expenses")):
+            continue
+        lines.append(
+            f"{key} | آفر {_money(s.get('quoted'))} | قرارداد {_money(s.get('contracted'))}\n"
+            f"دریافتی {_money(f.get('received'))} | هزینه {_money(f.get('expenses'))}"
+        )
+    if len(lines) == 2:
+        lines.append("هنوز داده ماهانه‌ای ثبت نشده است.")
+    return "\n\n".join(lines)
+
+
+def show_company_trends(chat_id):
+    metrics = _fetch_company_metrics(force=True)
+    bot.telegram_send_photo(render_company_trends(metrics), "📈 روند ماهانه مترا — ۲۰۲۶", chat_id)
+
+
+def show_market_trends(chat_id):
+    bot.telegram_send_photo(render_market_trends(), "📈 روند ۳۰ روزه بازار", chat_id)
+
+
 def show_metra_dashboard(chat_id, force=False):
     metrics = _fetch_company_metrics(force=force)
     bot.telegram_send_photo(
@@ -477,6 +644,15 @@ def handle_message(m):
     elif raw == "🏢 داشبورد مترا" or low == "/metra":
         bot.MAIN_KEYBOARD = MAIN_MENU
         show_metra_dashboard(chat_id)
+    elif raw == "📈 روند مترا" or low == "/metra_trend":
+        bot.MAIN_KEYBOARD = MAIN_MENU
+        show_company_trends(chat_id)
+    elif raw == "📈 روند بازار" or low == "/market_trend":
+        bot.MAIN_KEYBOARD = MAIN_MENU
+        show_market_trends(chat_id)
+    elif raw == "🔎 جزئیات مالی مترا" or low == "/metra_details":
+        bot.MAIN_KEYBOARD = MAIN_MENU
+        bot.telegram_send_message(company_financial_details(_fetch_company_metrics(force=True)), chat_id, True)
     elif raw == "🔄 بررسی مجدد" or low == "/refresh":
         bot.MAIN_KEYBOARD = MAIN_MENU
         started = bot.start_market_refresh(chat_id, force=True)
