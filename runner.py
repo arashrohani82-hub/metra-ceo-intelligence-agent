@@ -297,26 +297,33 @@ def render_metra_dashboard(metrics):
 
     offers = int(metrics.get("offers") or 0)
     accepted = int(metrics.get("accepted_projects") or 0)
+    pipeline = int(metrics.get("pipeline") or 0)
     conversion = float(metrics.get("conversion_rate") or 0)
-    card(48, 145, 516, 300, "آفرهای امسال", _money(metrics.get("quoted")), f"{offers} آفر ارسال شده", (41, 182, 246))
-    card(564, 145, 1032, 300, "قراردادهای تبدیل‌شده", _money(metrics.get("contracted")), f"{accepted} پروژه | نرخ تبدیل {conversion:.0%}", (46, 204, 113))
-    card(48, 325, 516, 480, "دریافتی امسال", _money(metrics.get("received_ytd")), "مبلغ وصول‌شده", (46, 204, 113))
-    card(564, 325, 1032, 480, "هزینه‌های شرکت", _money(metrics.get("company_expenses_ytd")), f"{int(metrics.get('company_expense_transactions_ytd') or 0)} تراکنش ثبت‌شده", (245, 158, 11))
-    card(48, 505, 516, 660, "مطالبات", _money(metrics.get("receivables")), "قراردادها منهای دریافتی", (139, 92, 246))
-    card(564, 505, 1032, 660, "بدهی‌های جاری", _money(metrics.get("payables_current")), "تعهدات پرداخت‌نشده", (239, 68, 68))
-    card(48, 685, 516, 840, "تارگت سالانه", _money(metrics.get("annual_target")), "هدف فروش قراردادها", (41, 182, 246))
+    quoted = float(metrics.get("quoted") or 0)
+    contracted = float(metrics.get("contracted") or 0)
+    target = metrics.get("annual_target")
+    expected = metrics.get("expected_to_date")
+    remaining = max(float(target) - contracted, 0.0) if target else None
+    average_offer = quoted / offers if offers else None
+    average_contract = contracted / accepted if accepted else None
+
+    card(48, 145, 516, 300, "آفرهای امسال", _money(quoted), f"{offers} آفر ارسال شده", (41, 182, 246))
+    card(564, 145, 1032, 300, "قراردادهای تبدیل‌شده", _money(contracted), f"{accepted} پروژه | نرخ تبدیل {conversion:.0%}", (46, 204, 113))
+    card(48, 325, 516, 480, "هزینه‌های ثبت‌شده", _money(metrics.get("company_expenses_ytd")), f"{int(metrics.get('company_expense_transactions_ytd') or 0)} تراکنش شرکت", (245, 158, 11))
+    card(564, 325, 1032, 480, "پایپ‌لاین فعال", str(pipeline), f"{int(metrics.get('on_hold') or 0)} در انتظار", (139, 92, 246))
+    card(48, 505, 516, 660, "تارگت سالانه", _money(target), "هدف فروش سال ۲۰۲۶", (41, 182, 246))
+    card(564, 505, 1032, 660, "مانده تا تارگت", _money(remaining), "بر اساس قراردادهای تبدیل‌شده", (239, 68, 68) if remaining else (46, 204, 113))
+    card(48, 685, 516, 840, "تارگت مورد انتظار تا امروز", _money(expected), "متناسب با زمان سپری‌شده", (41, 182, 246))
     variance = metrics.get("schedule_variance")
     variance_color = (46, 204, 113) if variance is not None and variance >= 0 else (239, 68, 68)
-    card(564, 685, 1032, 840, "واریانس تا امروز", _money(variance), "نسبت به تارگت زمانی", variance_color)
+    card(564, 685, 1032, 840, "واریانس زمانی", _money(variance), "عملکرد منهای تارگت امروز", variance_color)
 
     d.text((48, 885), bot.rtl("پیشرفت سال و تارگت"), font=bot.font(29, True), fill=(240, 244, 248))
     _progress_bar(d, 935, "زمان سپری‌شده از سال", metrics.get("time_progress"), (41, 182, 246))
     _progress_bar(d, 1040, "پیشرفت تارگت فروش", metrics.get("target_progress"), (46, 204, 113))
 
-    expected = metrics.get("expected_to_date")
-    net_cash = metrics.get("net_cash")
     d.rounded_rectangle((48, 1150, 1032, 1245), radius=18, fill=(18, 29, 39), outline=(69, 84, 99), width=2)
-    summary = f"تارگت تا امروز: {_money(expected)}    |    جریان نقدی خالص: {_money(net_cash)}"
+    summary = f"میانگین آفر: {_money(average_offer)}    |    میانگین قرارداد: {_money(average_contract)}"
     d.text((72, 1182), bot.rtl(summary), font=bot.font(21, True), fill=(220, 228, 235))
     if metrics.get("errors"):
         d.text((48, 1264), "Data: " + ", ".join(metrics["errors"]), font=bot.font(14), fill=(255, 170, 70))
@@ -328,17 +335,11 @@ def render_metra_dashboard(metrics):
 
 def show_metra_dashboard(chat_id, force=False):
     metrics = _fetch_company_metrics(force=force)
-    missing = []
-    if metrics.get("annual_target") is None:
-        missing.append("تارگت")
-    if metrics.get("received_ytd") is None:
-        missing.append("دریافتی")
-    if metrics.get("payables_current") is None:
-        missing.append("بدهی")
-    caption = "🏢 داشبورد مدیریتی مترا"
-    if missing:
-        caption += "\n⚙️ نیازمند تنظیم: " + "، ".join(missing)
-    bot.telegram_send_photo(render_metra_dashboard(metrics), caption, chat_id)
+    bot.telegram_send_photo(
+        render_metra_dashboard(metrics),
+        "🏢 داشبورد مدیریتی مترا — عملکرد سال ۲۰۲۶",
+        chat_id,
+    )
 
 
 def render_market_only(s):
