@@ -11,7 +11,6 @@ bot.VERSION = "CEO-BOT-V24-PRIME"
 MAIN_MENU = {
     "keyboard": [
         [{"text": "📊 داشبورد"}],
-        [{"text": "💰 ارز و طلا"}],
         [{"text": "🔄 بررسی مجدد"}],
     ],
     "resize_keyboard": True,
